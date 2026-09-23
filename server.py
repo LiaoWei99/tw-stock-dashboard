@@ -16,15 +16,18 @@ def n(v):
     except:return 0.0
 
 def company_rows():
-    out=[]
-    for market, dataset in [('上市','opendata/t187ap03_L'),('上櫃','opendata/t187ap03_O')]:
+    # Listed and OTC use their own official OpenAPI hosts. Stock code is the primary key.
+    out=[]; sources=[
+      ('上市','https://openapi.twse.com.tw/v1/opendata/t187ap03_L'),
+      ('上櫃','https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O')]
+    for market, url in sources:
         try:
-            for r in get_json('https://openapi.twse.com.tw/v1/'+dataset):
-                code=next((str(r.get(k,'')).strip() for k in r if '公司代號' in k or k.lower() in ('code','companycode')), '')
+            for r in get_json(url):
+                code=next((str(r.get(k,'')).strip() for k in r if '公司代號' in k or k.lower() in ('code','companycode','securitiescompanycode')), '')
                 name=next((str(r.get(k,'')).strip() for k in r if '公司簡稱' in k), '') or next((str(r.get(k,'')).strip() for k in r if '公司名稱' in k), '')
-                industry=next((str(r.get(k,'')).strip() for k in r if '產業別' in k), '')
+                industry=next((str(r.get(k,'')).strip() for k in r if '產業別' in k or '產業類別' in k), '')
                 business=next((str(r.get(k,'')).strip() for k in r if '主要經營業務' in k or '主要業務' in k), '')
-                if code: out.append({'code':code,'name':name,'industry':industry,'business':business,'market':market,'raw':r})
+                if code and code.isdigit(): out.append({'code':code,'name':name,'industry':industry,'business':business,'market':market,'raw':r})
         except Exception:
             pass
     return out
@@ -56,7 +59,7 @@ def manifest(): return send_from_directory(BASE,'manifest.webmanifest',mimetype=
 @app.get('/sw.js')
 def sw(): return send_from_directory(BASE,'sw.js',mimetype='application/javascript')
 @app.get('/health')
-def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'6.0-dual-model-scoring'})
+def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'7.0-swing-search-news-engine'})
 
 @app.get('/api/twse/realtime')
 def realtime():
@@ -128,16 +131,75 @@ def news_global():
     try:return jsonify({'ok':True,'source':'Google News RSS 聚合','rows':news_rss(query,20),'ts':int(time.time()*1000),'note':'新聞為聚合來源，更新速度取決於原始媒體與聚合索引。'})
     except Exception as e:return jsonify({'ok':False,'error':str(e)}),502
 
+def _field(r, needles):
+    for k,v in r.items():
+        ks=str(k)
+        if any(x in ks for x in needles): return str(v or '').strip()
+    return ''
+
+def official_material_info(code, market, limit=12):
+    url=('https://openapi.twse.com.tw/v1/opendata/t187ap04_L' if market=='上市'
+         else 'https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap04_O')
+    out=[]
+    try:
+        for r in get_json(url):
+            rc=_field(r,['公司代號','證券代號','SecuritiesCompanyCode','CompanyCode'])
+            if rc != code: continue
+            title=_field(r,['主旨','重大訊息','說明','Subject'])
+            date=_field(r,['發言日期','公告日期','Date'])
+            tm=_field(r,['發言時間','公告時間','Time'])
+            if title:
+                se,reason=sentiment(title)
+                out.append({'title':title,'url':'https://mops.twse.com.tw/mops/web/index','published':(date+' '+tm).strip(),
+                            'source':'公開資訊觀測站／官方重大訊息','category':'官方重大訊息',
+                            'relation':'公司直接','sentiment':se,'sentiment_reason':reason})
+            if len(out)>=limit: break
+    except Exception:
+        pass
+    return out
+
+def layered_stock_news(code, name, industry, market):
+    queries=[]
+    if name: queries += [(f'"{name}" when:7d','公司直接新聞'),(f'{name} {code} when:14d','公司直接新聞')]
+    if name and industry: queries += [(f'"{name}" {industry} when:14d','產業／供應鏈')]
+    if industry: queries += [(f'{industry} 台股 when:7d','產業／供應鏈')]
+    rows=[]; seen=set()
+    for q,cat in queries:
+        try:
+            for x in news_rss(q,10):
+                key=re.sub(r'\\s+',' ',x.get('title','')).strip().lower()
+                if not key or key in seen: continue
+                seen.add(key)
+                x['category']=cat
+                x['relation']='公司直接' if (name and name in x.get('title','')) else ('產業相關' if cat=='產業／供應鏈' else '可能相關')
+                x['sentiment'],x['sentiment_reason']=sentiment(x.get('title',''))
+                rows.append(x)
+        except Exception:
+            pass
+    official=official_material_info(code,market,12)
+    # Official disclosures first, then media. Avoid duplicate titles.
+    merged=[]; seen2=set()
+    for x in official+rows:
+        key=re.sub(r'\\s+',' ',x.get('title','')).strip().lower()
+        if key and key not in seen2:
+            seen2.add(key); merged.append(x)
+    return merged[:30]
+
 @app.get('/api/news/stock')
 def news_stock():
-    code=request.args.get('code','').strip(); name=request.args.get('name','').strip(); industry=request.args.get('industry','').strip()
-    terms=' OR '.join(x for x in [code,name,industry] if x)
-    if not terms:return jsonify({'ok':False,'error':'code/name/industry required'}),400
+    code=request.args.get('code','').strip(); name=request.args.get('name','').strip()
+    industry=request.args.get('industry','').strip(); market=request.args.get('market','').strip()
+    if not code and not name:return jsonify({'ok':False,'error':'code/name required'}),400
     try:
-        rows=news_rss(f'({terms}) when:7d',15)
-        for x in rows:
-            x['sentiment'],x['sentiment_reason']=sentiment(x.get('title',''))
-        return jsonify({'ok':True,'source':'Google News RSS 聚合','rows':rows,'query':terms,'sentiment_note':'多空為標題規則初判，不代表股價預測；中性/待確認不強行分類。'})
+        if code and (not name or not market):
+            m=[x for x in company_rows() if x['code']==code]
+            if m:
+                name=name or m[0]['name']; industry=industry or m[0]['industry']; market=market or m[0]['market']
+        rows=layered_stock_news(code,name,industry,market)
+        return jsonify({'ok':True,'source':'官方重大訊息 + Google News 分層聚合','rows':rows,
+          'coverage':['公司直接新聞','官方重大訊息','產業／供應鏈'],
+          'note':'若公司直接新聞不足，會續查官方重大訊息與產業事件；不以不相關新聞填補。',
+          'sentiment_note':'偏多/偏空為事件方向規則分類，不代表股價預測。'})
     except Exception as e:return jsonify({'ok':False,'error':str(e)}),502
 
 @app.get('/api/futures/ranking')
@@ -177,29 +239,40 @@ def _pick(r, includes):
         if all(s in k for s in includes): return v
     return None
 
-def valuation_row(code):
+def valuation_row(code, market='上市'):
     try:
-        for r in get_json('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL'):
-            if str(r.get('Code','')).strip()==code:
-                return {'pe':n(r.get('PEratio')) or None,'pb':n(r.get('PBratio')) or None,'yield':n(r.get('DividendYield')) or None,'source':'TWSE BWIBBU_ALL'}
+        if market=='上市':
+            rows=get_json('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL')
+        else:
+            rows=get_json('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis')
+        for r in rows:
+            rc=str(r.get('Code') or r.get('SecuritiesCompanyCode') or r.get('SecuritiesCompanyCode') or _field(r,['證券代號','股票代號','公司代號'])).strip()
+            if rc!=code: continue
+            def gv(keys):
+                for k,v in r.items():
+                    if any(x.lower() in str(k).lower() for x in keys): 
+                        z=n(v); return z or None
+                return None
+            return {'pe':gv(['PEratio','本益比']),'pb':gv(['PBratio','股價淨值比']),'yield':gv(['DividendYield','殖利率']),
+                    'source':'TWSE/TPEX 官方估值資料'}
     except Exception: pass
     return None
 
-def institutional_row(code):
+def institutional_row(code, market='上市'):
     try:
-        for r in get_json('https://openapi.twse.com.tw/v1/fund/T86_ALL'):
-            if str(r.get('Code','')).strip()!=code: continue
+        rows=(get_json('https://openapi.twse.com.tw/v1/fund/T86_ALL') if market=='上市'
+              else get_json('https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading'))
+        for r in rows:
+            rc=str(r.get('Code') or r.get('SecuritiesCompanyCode') or _field(r,['證券代號','股票代號','公司代號'])).strip()
+            if rc!=code: continue
             def val(*names):
-                for name in names:
-                    if name in r:return n(r.get(name))
                 for k,v in r.items():
-                    if any(name in k for name in names):return n(v)
+                    if any(name.lower() in str(k).lower() for name in names): return n(v)
                 return 0
-            foreign=val('Foreign_Investor','Foreign Investors','外陸資買賣超股數','外資及陸資買賣超股數')
-            trust=val('Investment_Trust','Investment Trust','投信買賣超股數')
-            dealer=val('Dealer_total','Dealer','自營商買賣超股數')
-            total=val('Total','三大法人買賣超股數') or foreign+trust+dealer
-            return {'foreign':foreign,'trust':trust,'dealer':dealer,'total':total,'source':'TWSE T86_ALL','timing':'官方盤後法人資料；依交易所公告時程更新'}
+            foreign=val('Foreign','外資','外陸資'); trust=val('Investment_Trust','Investment Trust','投信')
+            dealer=val('Dealer','自營商'); total=val('Total','三大法人') or foreign+trust+dealer
+            return {'foreign':foreign,'trust':trust,'dealer':dealer,'total':total,
+                    'source':'TWSE/TPEX 三大法人官方資料','timing':'官方盤後法人資料；依交易所公告時程更新'}
     except Exception: pass
     return None
 
@@ -225,8 +298,8 @@ def _norm(points, available, target):
     return round(points/available*target) if available>0 else None
 
 def analyst_model(company, quote):
-    code=company['code']; market=company['market']; val=valuation_row(code) if market=='上市' else None
-    inst=institutional_row(code) if market=='上市' else None
+    code=company['code']; market=company['market']; val=valuation_row(code,market)
+    inst=institutional_row(code,market)
     hist=twse_history(code,4) if market=='上市' else []
     # Fundamental: 20 overnight / 35 swing. Only verified fields count.
     fp=0; fa=0; freasons=[]
