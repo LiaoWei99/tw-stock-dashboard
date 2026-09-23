@@ -21,7 +21,7 @@ def manifest(): return send_from_directory(BASE,'manifest.webmanifest',mimetype=
 @app.get('/sw.js')
 def sw(): return send_from_directory(BASE,'sw.js',mimetype='application/javascript')
 @app.get('/health')
-def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'3.0'})
+def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'4.0-swing-overnight'})
 
 @app.get('/api/twse/realtime')
 def realtime():
@@ -34,7 +34,7 @@ def realtime():
 @app.get('/api/market/top')
 def market_top():
     try:
-        limit=max(5,min(int(request.args.get('limit','20')),50)); rows=get_json('https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL'); out=[]
+        limit=max(5,min(int(request.args.get('limit','20')),5000)); rows=get_json('https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL'); out=[]
         for r in rows:
             code=str(r.get('Code',''))
             if not code.isdigit():continue

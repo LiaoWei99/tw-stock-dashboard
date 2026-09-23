@@ -1,14 +1,5 @@
-# 台股即時選股作戰台 v3
+# V4 波段＋隔日沖版
 
-Render 啟動：`gunicorn -b 0.0.0.0:${PORT:-8787} server:app`
+上傳本資料夾全部檔案至 GitHub repo 根目錄並 Commit。Render 若已連 main 且 Auto Deploy 開啟會自動部署；否則 Deploy latest commit。
 
-內建：TWSE MIS、TWSE OpenAPI、Google News RSS 聚合、個股搜尋/產業/新聞雷達。
-
-真正「期貨盤中即時漲跌排行」需合法授權行情源，Render 設定：
-- `FUTURES_PROVIDER_URL`
-- `FUTURES_PROVIDER_TOKEN`
-- `FUTURES_PROVIDER_NAME`
-
-未設定時前端會顯示 Realtime Unavailable，不會把 TAIFEX 盤後資料冒充即時。
-
-新聞是事件雷達，標題關聯不等同因果；應點擊原始媒體核對。
+資料原則：TWSE 公開資料用於市場/個股；Google News RSS 為新聞聚合；即時期貨排行只有設定 FUTURES_PROVIDER_URL / TOKEN 後才顯示為即時。缺資料不偽造、不參與評分。

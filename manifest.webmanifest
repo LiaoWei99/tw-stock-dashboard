@@ -1,10 +1,1 @@
-{
-  "name":"台股每日選股作戰台",
-  "short_name":"台股作戰台",
-  "start_url":"/",
-  "display":"standalone",
-  "background_color":"#07111e",
-  "theme_color":"#07111e",
-  "lang":"zh-Hant",
-  "description":"TWSE 即時行情、TAIFEX 資料與每日選股工作台"
-}
+{"name":"台股波段・隔日沖作戰台","short_name":"台股作戰台","start_url":"/","display":"standalone","background_color":"#07111e","theme_color":"#07111e","lang":"zh-Hant","description":"台股波段、隔日沖、資金輪動、新聞與個股事件研究工作台"}
