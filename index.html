@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>台股策略選股儀表板</title>
+<style>
+:root{--bg:#f6f9fc;--card:#fff;--ink:#17324d;--muted:#6e8194;--line:#d9e6f2;--blue:#1476c9;--blue2:#eaf5ff;--red:#e84d64;--green:#31a474;--gold:#b78720;--shadow:0 10px 30px rgba(36,74,110,.08)}
+*{box-sizing:border-box} body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",sans-serif;background:linear-gradient(180deg,#f4f8fc,#eef5fb);color:var(--ink)}
+.wrap{max-width:1180px;margin:auto;padding:28px 18px 64px}.top{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:18px}.brand{font-weight:850;font-size:22px;letter-spacing:.02em}.date{color:var(--muted);font-size:14px}
+.search{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:18px;box-shadow:var(--shadow)}.search label{font-size:20px;font-weight:800;display:block;margin-bottom:12px}.searchbox{display:flex;gap:10px}.searchbox input{flex:1;border:2px solid #b9d3ea;border-radius:16px;padding:15px 16px;font-size:17px;outline:none}.searchbox button{border:0;border-radius:16px;background:var(--blue);color:#fff;padding:0 20px;font-weight:800;cursor:pointer}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.panel{background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:22px;padding:18px;box-shadow:var(--shadow)}.panel h3{margin:0 0 12px;font-size:18px}.scope{display:flex;align-items:center;justify-content:space-between;background:var(--blue2);border:1px solid #bcd8ef;padding:13px 14px;border-radius:16px}.pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:7px 11px;font-weight:750;font-size:13px;background:#edf5fb;color:#245b85}.pill.active{background:var(--blue);color:#fff}.filterrow{display:flex;gap:8px;flex-wrap:wrap}.filterrow button{border:1px solid #c9dceb;background:#fff;color:#315d7e;border-radius:999px;padding:9px 12px;cursor:pointer}.filterrow button.on{background:#173f66;color:white;border-color:#173f66}
+.summary{margin-top:16px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{background:#f5f9fc;border-radius:14px;padding:12px}.metric b{display:block;font-size:21px}.metric span{font-size:12px;color:var(--muted)}
+.stocklist{margin-top:16px;display:grid;gap:10px}.stock{display:grid;grid-template-columns:1.2fr .8fr 1fr 100px;align-items:center;gap:10px;padding:14px 15px;border:1px solid var(--line);border-radius:16px;background:#fff}.stock .name{font-size:18px;font-weight:850}.stock .sub{font-size:12px;color:var(--muted);margin-top:3px}.chg{font-weight:850;color:var(--red)}.hit{justify-self:end;background:#edf5ff;color:#1f5c91;border-radius:999px;padding:6px 9px;font-weight:750;font-size:12px}.limit{background:var(--red);color:#fff;margin-left:5px;border-radius:999px;padding:5px 8px;font-size:12px}
+.section-title{margin:28px 2px 12px;display:flex;justify-content:space-between;align-items:end}.section-title h2{margin:0;font-size:22px}.section-title p{margin:0;color:var(--muted);font-size:13px}.cards{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}.chartcard{background:#111827;color:#f6f7fb;border-radius:20px;padding:16px;box-shadow:0 14px 35px rgba(0,0,0,.16)}.charthead{display:flex;justify-content:space-between;align-items:center}.charthead b{font-size:21px}.charthead .price{font-size:19px}.tags{display:flex;gap:6px;flex-wrap:wrap;margin:9px 0}.tag{font-size:11px;border:1px solid #52677a;color:#b9d9f4;padding:4px 7px;border-radius:5px}.tag.g{color:#b9e5c8;border-color:#3e6e50}.tag.o{color:#f0c5a4;border-color:#8c563b}.tag.p{color:#e2b7e5;border-color:#7b4d80}.chart{height:190px;width:100%;display:block;background:linear-gradient(#111827,#0f172a);border-radius:10px}.legend{display:flex;justify-content:space-between;color:#8fa3b6;font-size:11px;margin-top:8px}
+.note{margin-top:18px;color:var(--muted);font-size:12px;line-height:1.6}.footer{margin-top:34px;padding-top:18px;border-top:1px solid var(--line);color:#6d8296;font-size:12px}
+@media(max-width:760px){.grid2,.cards{grid-template-columns:1fr}.stock{grid-template-columns:1fr auto}.stock .strategy{display:none}.hit{grid-column:2}.summary{grid-template-columns:1fr 1fr 1fr}.wrap{padding:18px 12px 50px}.top{align-items:flex-start}.brand{font-size:19px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><div class="brand">台股策略研究｜技術面選股</div><div class="date" id="today">資料日 2026-09-18</div></div>
+  <section class="search">
+    <label>股票代號或名稱</label>
+    <div class="searchbox"><input id="q" placeholder="輸入 2330、台積電、策略名稱"><button onclick="applySearch()">搜尋</button></div>
+    <div class="grid2">
+      <div class="panel"><h3>清單範圍</h3><div class="scope"><b>族群連動 2.0</b><span class="pill active">8 檔⌄</span></div></div>
+      <div class="panel"><h3>篩選器</h3><div class="filterrow"><button class="on" onclick="toggle(this)">量能放大優先</button><button onclick="toggle(this)">均線轉強</button><button onclick="toggle(this)">布林突破</button><button onclick="toggle(this)">KD 黃金交叉</button></div></div>
+    </div>
+    <div class="summary"><div class="metric"><b id="count">8</b><span>符合標的</span></div><div class="metric"><b>2026-09-18</b><span>最新訊號日</span></div><div class="metric"><b>盤後</b><span>資料更新頻率</span></div></div>
+    <div class="stocklist" id="stocks"></div>
+  </section>
+
+  <div class="section-title"><div><h2>技術面命中排行</h2><p>以策略訊號、均線、KD、布林與量能做視覺化整理</p></div><p>示範介面</p></div>
+  <div class="cards" id="cards"></div>
+  <div class="note">設計拆解：上層是搜尋與策略範圍，中層用可切換條件縮小清單，下層用卡片呈現個股技術圖。手機版採單欄、圓角大卡與高對比漲跌標籤，方便快速掃描。此原型使用示範資料，未串接即時行情。</div>
+  <div class="footer">資料與策略僅供介面展示與研究，不構成投資建議。</div>
+</div>
+<script>
+const data=[
+ {c:'2221',n:'大甲',p:'127.5',chg:'+9.91%',hit:11,s:'鋼管'},
+ {c:'1560',n:'中砂',p:'896.0',chg:'+9.94%',hit:13,s:'晶圓材料'},
+ {c:'3094',n:'聯傑',p:'51.7',chg:'+10.00%',hit:5,s:'網通射頻IC'},
+ {c:'3443',n:'創意',p:'7,150',chg:'+10.00%',hit:8,s:'矽智財'},
+ {c:'3605',n:'宏致',p:'154.0',chg:'+10.00%',hit:2,s:'連接器'},
+ {c:'6538',n:'倉和',p:'388.0',chg:'+9.92%',hit:9,s:'其他太陽能'},
+ {c:'3264',n:'欣銓',p:'268.5',chg:'+9.82%',hit:1,s:'IC封測'},
+ {c:'6168',n:'宏齊',p:'38.85',chg:'+9.90%',hit:1,s:'封裝及模組'}
+];
+function render(list=data){
+ document.getElementById('count').textContent=list.length;
+ document.getElementById('stocks').innerHTML=list.map(x=>`<div class="stock"><div><div class="name">${x.c} ${x.n}</div><div class="sub">${x.s}</div></div><div class="chg">${x.chg}<span class="limit">強勢</span></div><div class="strategy"><span class="pill">族群連動 2.0</span></div><div class="hit">命中 ${x.hit} 次</div></div>`).join('');
+ document.getElementById('cards').innerHTML=list.slice(0,6).map((x,i)=>card(x,i)).join('');
+}
+function card(x,i){let pts=[]; for(let k=0;k<18;k++){let base=125-(k*3.2)-(Math.sin(k*1.4+i)*11); pts.push(`${k*38},${Math.max(18,Math.min(155,base))}`)}
+ return `<article class="chartcard"><div class="charthead"><b>${x.c} ${x.n}</b><div><span class="price">${x.p}</span> <span class="chg">${x.chg}</span></div></div><div class="tags"><span class="tag">均線多頭</span><span class="tag g">KD黃金交叉</span><span class="tag o">布林突破</span><span class="tag p">爆量長紅</span></div><svg class="chart" viewBox="0 0 650 180" preserveAspectRatio="none"><polyline points="${pts.join(' ')}" fill="none" stroke="#e5b84a" stroke-width="3"/><polyline points="0,145 80,140 160,133 240,128 320,120 400,112 480,108 560,95 650,88" fill="none" stroke="#49a8df" stroke-width="3"/><line x1="0" y1="150" x2="650" y2="150" stroke="#854d8e" stroke-width="2"/><rect x="610" y="${38+i*4}" width="20" height="${112-i*4}" fill="#ef5350"/><rect x="575" y="90" width="20" height="60" fill="#26a69a"/></svg><div class="legend"><span>MA5 / MA20 / MA60 · 布林 20,2σ</span><span>量能放大</span></div></article>`}
+function applySearch(){let q=document.getElementById('q').value.trim().toLowerCase(); render(!q?data:data.filter(x=>(x.c+x.n+x.s).toLowerCase().includes(q)))}
+function toggle(el){el.classList.toggle('on')}
+render();
+</script>
+</body></html>

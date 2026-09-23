@@ -1,0 +1,10 @@
+{
+  "name":"台股每日選股作戰台",
+  "short_name":"台股作戰台",
+  "start_url":"/",
+  "display":"standalone",
+  "background_color":"#07111e",
+  "theme_color":"#07111e",
+  "lang":"zh-Hant",
+  "description":"TWSE 即時行情、TAIFEX 資料與每日選股工作台"
+}
