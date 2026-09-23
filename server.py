@@ -10,8 +10,43 @@ def fetch(url, accept='application/json'):
     with urlopen(req,timeout=15) as r: return r.read()
 def get_json(url): return json.loads(fetch(url).decode('utf-8'))
 def n(v):
-    try:return float(str(v).replace(',',''))
+    try:
+        x=str(v or '').replace(',','').replace('+','').strip()
+        return float(x) if x not in ('','--','---') else 0.0
     except:return 0.0
+
+def company_rows():
+    out=[]
+    for market, dataset in [('上市','opendata/t187ap03_L'),('上櫃','opendata/t187ap03_O')]:
+        try:
+            for r in get_json('https://openapi.twse.com.tw/v1/'+dataset):
+                code=next((str(r.get(k,'')).strip() for k in r if '公司代號' in k or k.lower() in ('code','companycode')), '')
+                name=next((str(r.get(k,'')).strip() for k in r if '公司簡稱' in k), '') or next((str(r.get(k,'')).strip() for k in r if '公司名稱' in k), '')
+                industry=next((str(r.get(k,'')).strip() for k in r if '產業別' in k), '')
+                business=next((str(r.get(k,'')).strip() for k in r if '主要經營業務' in k or '主要業務' in k), '')
+                if code: out.append({'code':code,'name':name,'industry':industry,'business':business,'market':market,'raw':r})
+        except Exception:
+            pass
+    return out
+
+def mis_quote(code, market):
+    ex='tse' if market=='上市' else 'otc'
+    url='https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch='+quote(f'{ex}_{code}.tw',safe='|_.')+'&json=1&delay=0'
+    data=get_json(url); rows=data.get('msgArray') or []
+    if not rows:return None
+    r=rows[0]; last=n(r.get('z')) or n(r.get('y')); prev=n(r.get('y')); change=last-prev if last and prev else 0
+    return {'code':code,'name':r.get('n') or r.get('nf') or '', 'market':market,'price':last or None,'prev_close':prev or None,
+      'change':round(change,2),'pct':round(change/prev*100,2) if prev else None,'open':n(r.get('o')) or None,'high':n(r.get('h')) or None,
+      'low':n(r.get('l')) or None,'volume':n(r.get('v')) or None,'time':r.get('t') or '', 'date':r.get('d') or '', 'source':'TWSE MIS'}
+
+def sentiment(title):
+    t=(title or '').lower()
+    bull=['創高','新高','上修','成長','增加','大增','擴產','接單','訂單','獲利','轉盈','優於預期','調升','合作','得標','需求強','漲價','營收增','看旺','利多']
+    bear=['下修','衰退','減少','大減','虧損','轉虧','砍單','取消訂單','低於預期','調降','停工','裁員','處分','違約','調查','罰款','需求弱','跌價','營收減','利空']
+    bs=sum(1 for k in bull if k in t); ss=sum(1 for k in bear if k in t)
+    if bs>ss:return '偏多','標題含正向營運／需求／獲利訊號；仍需閱讀原文確認。'
+    if ss>bs:return '偏空','標題含負向營運／需求／風險訊號；仍需閱讀原文確認。'
+    return '中性／待確認','僅憑標題無法可靠判定方向，需閱讀原文。'
 
 @app.get('/')
 @app.get('/live.html')
@@ -21,7 +56,7 @@ def manifest(): return send_from_directory(BASE,'manifest.webmanifest',mimetype=
 @app.get('/sw.js')
 def sw(): return send_from_directory(BASE,'sw.js',mimetype='application/javascript')
 @app.get('/health')
-def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'4.0-swing-overnight'})
+def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'5.0-search-quote-news-sentiment'})
 
 @app.get('/api/twse/realtime')
 def realtime():
@@ -46,20 +81,36 @@ def market_top():
 
 @app.get('/api/company/search')
 def company_search():
-    q=request.args.get('q','').strip().lower()
+    q=request.args.get('q','').strip()
     if not q:return jsonify({'ok':False,'error':'q required'}),400
     try:
-        rows=get_json('https://openapi.twse.com.tw/v1/opendata/t187ap03_L'); hits=[]
-        for r in rows:
-            blob=' '.join(str(v) for v in r.values()).lower()
-            if q in blob:
-                code=next((str(r.get(k,'')) for k in r if '公司代號' in k or k.lower() in ('code','companycode')), '')
-                name=next((str(r.get(k,'')) for k in r if '公司簡稱' in k or '公司名稱' in k), '')
-                industry=next((str(r.get(k,'')) for k in r if '產業別' in k), '')
-                hits.append({'code':code,'name':name,'industry':industry,'raw':r})
-            if len(hits)>=12:break
-        return jsonify({'ok':True,'source':'TWSE OpenAPI 上市公司基本資料','rows':hits})
+        rows=company_rows(); ql=q.lower()
+        if q.isdigit():
+            hits=[x for x in rows if x['code']==q]
+        else:
+            exact=[x for x in rows if x['name'].lower()==ql]
+            fuzzy=[x for x in rows if ql in x['name'].lower() or ql in x['industry'].lower() or ql in x['business'].lower()]
+            seen=set(); hits=[]
+            for x in exact+fuzzy:
+                k=(x['market'],x['code'])
+                if k not in seen: seen.add(k); hits.append(x)
+        return jsonify({'ok':True,'source':'TWSE OpenAPI 公司基本資料','match':'exact-code' if q.isdigit() else 'name-industry-business','rows':hits[:20]})
     except Exception as e:return jsonify({'ok':False,'error':str(e)}),502
+
+@app.get('/api/stock/context')
+def stock_context():
+    code=request.args.get('code','').strip()
+    if not code:return jsonify({'ok':False,'error':'code required'}),400
+    try:
+        matches=[x for x in company_rows() if x['code']==code]
+        if not matches:return jsonify({'ok':False,'error':'stock code not found'}),404
+        c=matches[0]
+        q=None
+        try:q=mis_quote(code,c['market'])
+        except Exception:pass
+        return jsonify({'ok':True,'company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'quote_status':'ok' if q else 'Unavailable','ts':int(time.time()*1000)})
+    except Exception as e:return jsonify({'ok':False,'error':str(e)}),502
+
 
 def news_rss(query, limit=12):
     url='https://news.google.com/rss/search?'+urlencode({'q':query,'hl':'zh-TW','gl':'TW','ceid':'TW:zh-Hant'})
@@ -82,7 +133,11 @@ def news_stock():
     code=request.args.get('code','').strip(); name=request.args.get('name','').strip(); industry=request.args.get('industry','').strip()
     terms=' OR '.join(x for x in [code,name,industry] if x)
     if not terms:return jsonify({'ok':False,'error':'code/name/industry required'}),400
-    try:return jsonify({'ok':True,'source':'Google News RSS 聚合','rows':news_rss(f'({terms}) when:7d',15),'query':terms})
+    try:
+        rows=news_rss(f'({terms}) when:7d',15)
+        for x in rows:
+            x['sentiment'],x['sentiment_reason']=sentiment(x.get('title',''))
+        return jsonify({'ok':True,'source':'Google News RSS 聚合','rows':rows,'query':terms,'sentiment_note':'多空為標題規則初判，不代表股價預測；中性/待確認不強行分類。'})
     except Exception as e:return jsonify({'ok':False,'error':str(e)}),502
 
 @app.get('/api/futures/ranking')

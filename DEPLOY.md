@@ -1,5 +1,10 @@
-# V4 波段＋隔日沖版
+# V5 部署
 
-上傳本資料夾全部檔案至 GitHub repo 根目錄並 Commit。Render 若已連 main 且 Auto Deploy 開啟會自動部署；否則 Deploy latest commit。
+本版修正個股搜尋與新聞方向標示：
+- 四位數代號採股票代號精確比對，不再掃描公司所有欄位。
+- 上市/上櫃分開辨識。
+- 每次個股搜尋直接抓該股 TWSE MIS 行情，不依賴成交值 Top 50。
+- 固定顯示最新價格、今日漲跌金額/幅度、開高低、成交量與行情時間。
+- 個股新聞標示偏多／偏空／中性待確認並附判斷理由；此為事件標題初判，不代表股價預測。
 
-資料原則：TWSE 公開資料用於市場/個股；Google News RSS 為新聞聚合；即時期貨排行只有設定 FUTURES_PROVIDER_URL / TOKEN 後才顯示為即時。缺資料不偽造、不參與評分。
+將 ZIP 內檔案全部覆蓋上傳到 GitHub repo 根目錄後 Commit；Render 再部署 main。
