@@ -1,6 +1,6 @@
-<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#07111e"><link rel="manifest" href="/manifest.webmanifest"><title>台股波段・隔日沖作戰台 V7</title><style>
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#07111e"><link rel="manifest" href="/manifest.webmanifest"><title>台股波段・隔日沖作戰台 V8</title><style>
 :root{--bg:#07111e;--card:#102237;--line:#29435e;--text:#edf5fc;--muted:#91a8be;--red:#ff6878;--green:#48d39f;--blue:#55aaff;--gold:#f4c75d}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Noto Sans TC",sans-serif}.wrap{max-width:1500px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.brand{font-size:25px;font-weight:900}.muted,.note{color:var(--muted)}.note{font-size:12px}.tabs{display:flex;gap:8px;overflow:auto;margin:18px 0}.tab,button{border:1px solid var(--line);background:#0c1b2c;color:#c9daea;padding:10px 14px;border-radius:10px;cursor:pointer}.tab.on,button.primary{background:#2475b8;color:#fff}.section{display:none}.section.on{display:block}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}.card{grid-column:span 4;background:linear-gradient(180deg,#122840,#0d1d2f);border:1px solid var(--line);border-radius:16px;padding:15px}.wide{grid-column:span 8}.full{grid-column:span 12}.half{grid-column:span 6}h3{margin:0 0 10px;font-size:15px}.big{font-size:28px;font-weight:900}.up{color:var(--red)}.dn{color:var(--green)}.gold{color:var(--gold)}.controls{display:flex;gap:8px;flex-wrap:wrap}.controls input{flex:1;min-width:240px;background:#081522;color:#fff;border:1px solid var(--line);padding:11px;border-radius:9px}.tablewrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px;border-bottom:1px solid #20384f;text-align:right;white-space:nowrap}th:first-child,td:first-child{text-align:left}.pill{display:inline-block;padding:4px 7px;border-radius:20px;background:#17304a;font-size:11px}.news a{color:#d9eaff;text-decoration:none}.news{padding:8px 0;border-bottom:1px solid #20384f}.status{padding:5px 8px;background:#17304a;border-radius:8px;font-size:12px}.warn{border-left:3px solid var(--gold);padding-left:10px}.score{font-weight:900;color:#9ed1ff}@media(max-width:850px){.card,.wide,.half{grid-column:span 12}.wrap{padding:14px}.brand{font-size:21px}}
-</style></head><body><div class="wrap"><div class="top"><div><div class="brand">台股波段・隔日沖作戰台 <span class="pill">V7</span></div><div class="muted">盤前情報 → 資金輪動 → 隔日延續 → 波段趨勢 → 個股事件</div></div><div><span id="apiStatus" class="status">資料更新中</span> <button class="primary" onclick="refreshAll()">全部更新</button> <span id="clock" class="muted"></span></div></div>
+</style></head><body><div class="wrap"><div class="top"><div><div class="brand">台股波段・隔日沖作戰台 <span class="pill">V8</span></div><div class="muted">盤前情報 → 資金輪動 → 隔日延續 → 波段趨勢 → 個股事件</div></div><div><span id="apiStatus" class="status">資料更新中</span> <button class="primary" onclick="refreshAll()">全部更新</button> <span id="clock" class="muted"></span></div></div>
 <div class="tabs"><button class="tab on" data-s="dash">總覽</button><button class="tab" data-s="overnight">隔日沖</button><button class="tab" data-s="swing">波段</button><button class="tab" data-s="flow">資金輪動</button><button class="tab" data-s="intel">國際情報</button><button class="tab" data-s="search">個股搜尋</button></div>
 <section id="dash" class="section on"><div class="grid"><div class="card"><h3>市場廣度</h3><div id="breadth" class="big">讀取中</div><div id="breadthSub" class="note"></div></div><div class="card"><h3>隔日延續 LSO</h3><div id="lso" class="big gold">計算中</div><div id="lsoSub" class="note"></div></div><div class="card"><h3>資料狀態</h3><div id="dataMode" class="big">TWSE</div><div class="note">公開資料版：波段/隔日沖。沒有授權期貨 feed 時不偽造盤中期貨數字。</div></div><div class="card full"><h3>今日成交值 Top 20</h3><div class="tablewrap"><table><thead><tr><th>股票</th><th>收/現價</th><th>漲跌%</th><th>成交值(億)</th><th>成交量</th><th>收盤位置</th></tr></thead><tbody id="topRows"></tbody></table></div></div></div></section>
 <section id="overnight" class="section"><div class="grid"><div class="card full"><h3>隔日沖候選池</h3><div class="note warn">以成交值、漲跌幅、收盤接近高點等可驗證欄位評分；法人/即時期貨等未接資料不納入分數。</div><div class="tablewrap"><table><thead><tr><th>股票</th><th>價格</th><th>漲跌%</th><th>成交值(億)</th><th>收盤位置</th><th>可用資料分數</th><th>狀態</th></tr></thead><tbody id="overnightRows"></tbody></table></div></div></div></section>
@@ -35,31 +35,69 @@ function swingHtml(a){
  let plan=p?`<div style="margin-top:10px"><b>觀察持有時間：</b>${esc(p.holding)}<br><b>布局區：</b>${p.entry[0]}～${p.entry[1]}<br><b>第一目標：</b>${p.target1}　<b>第二目標：</b>${p.target2}<br><b>失效/停損：</b>${p.stop}　<b>第一目標 RR：</b>${p.rr1}<div class="note">${esc(p.basis)}</div></div>`:'<div class="note">歷史K線或資料完整度不足時，不產生進出場價格。</div>';
  return `<div class="big">${s.score}/100</div><div>${head}</div><div>基本面 ${metric(f.swing_score,35)} ｜ 技術面 ${metric(t.swing_score,35)} ｜ 籌碼面 ${metric(c.swing_score,30)}</div><div>資料完整度：${s.completeness}%</div>${plan}<div class="note">${esc(s.threshold)}</div>`;
 }
-async function searchSwing(){
- let q=$('#swingSearch').value.trim(); if(!q)return;
- $('#swingSearchInfo').textContent='分析中…'; $('#swingSearchNews').textContent='搜尋事件中…';
- try{
-  let s=await (await fetch('/api/company/search?q='+encodeURIComponent(q),{cache:'no-store'})).json();
-  if(!s.ok||!s.rows.length){$('#swingSearchInfo').textContent='查無上市／上櫃公司資料';$('#swingSearchNews').textContent='—';return}
-  let x=s.rows[0];
-  if(s.rows.length>1 && !/^\d+$/.test(q)){
-    $('#swingSearchInfo').innerHTML='<b>找到多筆，請用股票代號精確搜尋：</b><br>'+s.rows.slice(0,10).map(y=>`${esc(y.code)} ${esc(y.name)}（${esc(y.market)}）`).join('<br>');
-    $('#swingSearchNews').textContent='請先指定股票代號'; return;
-  }
-  let ctx=await (await fetch('/api/stock/analysis?code='+encodeURIComponent(x.code),{cache:'no-store'})).json();
-  if(!ctx.ok){$('#swingSearchInfo').textContent='分析資料 Unavailable';return}
-  let m=ctx.quote,a=ctx.analysis,ss=a.swing;
-  let price=m?`<div><b>最新價格 ${m.price??'—'}</b>｜日內漲跌 <span class="${(m.pct||0)>=0?'up':'dn'}">${m.change>=0?'+':''}${m.change??'—'}（${m.pct>=0?'+':''}${m.pct??'—'}%）</span></div>`:'<div class="gold">最新行情 Unavailable</div>';
-  $('#swingSearchInfo').innerHTML=`<div class="big">${esc(x.code)} ${esc(x.name)}</div><div>${esc(x.market)}｜${esc(x.industry||'Unknown')}</div>${price}
-  <div style="margin-top:10px"><b>波段總分 ${ss.score}/100｜資料完整度 ${ss.completeness}%</b></div>
-  <div>基本面 ${a.fundamental.swing_score??'Unavailable'}/35｜技術面 ${a.technical.swing_score??'Unavailable'}/35｜籌碼面 ${a.chips.swing_score??'Unavailable'}/30</div>
-  <div style="margin-top:8px">${ss.eligible?'<span class="up"><b>符合模型波段觀察條件</b></span>':'<span class="gold"><b>目前未達模型波段條件</b></span>'}</div>
-  ${ss.plan?`<div>觀察持有：${esc(ss.plan.holding)}｜布局 ${ss.plan.entry[0]}～${ss.plan.entry[1]}｜目標一 ${ss.plan.target1}｜目標二 ${ss.plan.target2}｜失效 ${ss.plan.stop}｜RR ${ss.plan.rr1}</div>`:''}
-  <div class="note">缺少：${esc((a.missing||[]).join('、')||'無')}。價格到達失效條件優先於預估持有時間。</div>`;
-  let n=await (await fetch('/api/news/stock?code='+encodeURIComponent(x.code)+'&name='+encodeURIComponent(x.name)+'&industry='+encodeURIComponent(x.industry||'')+'&market='+encodeURIComponent(x.market||''),{cache:'no-store'})).json();
-  $('#swingSearchNews').innerHTML=n.ok&&n.rows.length?n.rows.map(z=>`<div class="news"><span class="pill ${z.sentiment==='偏多'?'up':z.sentiment==='偏空'?'dn':'gold'}">${esc(z.sentiment)}</span> <span class="pill">${esc(z.category||'新聞')}</span> <a href="${esc(z.url)}" target="_blank" rel="noopener"><b>${esc(z.title)}</b></a><div class="note">${esc(z.relation||'可能相關')}｜${esc(z.sentiment_reason)}｜${esc(z.source)}｜${esc(z.published)}</div></div>`).join(''):'目前查無可驗證的公司直接新聞、官方重大訊息或產業事件';
- }catch(e){$('#swingSearchInfo').textContent='Unavailable';$('#swingSearchNews').textContent='Unavailable'}
+
+async function getJson(url){
+ const r=await fetch(url,{cache:'no-store'});
+ let j=null; try{j=await r.json()}catch(e){throw new Error('非 JSON 回應')}
+ if(!r.ok) throw new Error(j?.error||('HTTP '+r.status));
+ return j;
 }
-async function searchStock(){let q=$('#stockSearch').value.trim();if(!q)return;$('#stockInfo').textContent='搜尋中…';$('#stockNews').textContent='搜尋中…';$('#overnightAnalysis').textContent='計算中…';$('#swingAnalysis').textContent='計算中…';try{let j=await (await fetch('/api/company/search?q='+encodeURIComponent(q),{cache:'no-store'})).json();if(!j.ok||!j.rows.length){$('#stockInfo').textContent='查無上市/上櫃公司資料';$('#stockNews').textContent='—';$('#overnightAnalysis').textContent='—';$('#swingAnalysis').textContent='—';return}let x=j.rows[0];let ctx=await (await fetch('/api/stock/analysis?code='+encodeURIComponent(x.code),{cache:'no-store'})).json();let m=ctx.quote;$('#stockInfo').innerHTML=`<div class="big">${esc(x.code)} ${esc(x.name)}</div><div>${esc(x.market)}｜產業：${esc(x.industry||'Unknown')}</div>${m?`<div><b>最新價格 ${m.price??'—'}</b>｜日內漲跌 <span class="${(m.pct||0)>=0?'up':'dn'}">${m.change>=0?'+':''}${m.change}（${m.pct>=0?'+':''}${m.pct}%）</span></div><div>開 ${m.open??'—'}｜高 ${m.high??'—'}｜低 ${m.low??'—'}｜量 ${m.volume??'—'}｜行情時間 ${esc(m.date||'')} ${esc(m.time||'')}</div>`:'<div class="gold">最新行情 Unavailable</div>'}<div class="note">核心業務：${esc(x.business||'Unknown')}</div>`;if(ctx.ok&&ctx.analysis){$('#overnightAnalysis').innerHTML=analysisHtml(ctx.analysis);$('#swingAnalysis').innerHTML=swingHtml(ctx.analysis)}else{$('#overnightAnalysis').textContent='Unavailable';$('#swingAnalysis').textContent='Unavailable'}let n=await (await fetch('/api/news/stock?code='+encodeURIComponent(x.code)+'&name='+encodeURIComponent(x.name)+'&industry='+encodeURIComponent(x.industry||'')+'&market='+encodeURIComponent(x.market||''),{cache:'no-store'})).json();$('#stockNews').innerHTML=n.ok?n.rows.map(z=>`<div class="news"><span class="pill ${z.sentiment==='偏多'?'up':z.sentiment==='偏空'?'dn':'gold'}">${esc(z.sentiment)}</span> <a href="${esc(z.url)}" target="_blank" rel="noopener"><b>${esc(z.title)}</b></a><div class="note">${esc(z.category||'新聞')}｜${esc(z.relation||'可能相關')}｜${esc(z.sentiment_reason)}｜${esc(z.source)}｜${esc(z.published)}</div></div>`).join(''):'Unavailable'}catch(e){$('#stockInfo').textContent='Unavailable';$('#stockNews').textContent='Unavailable';$('#overnightAnalysis').textContent='Unavailable';$('#swingAnalysis').textContent='Unavailable'}}
-async function refreshAll(){await Promise.all([loadMarket(),loadNews(),loadFutures()])}document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab,.section').forEach(x=>x.classList.remove('on'));b.classList.add('on');$('#'+b.dataset.s).classList.add('on')});setInterval(()=>$('#clock').textContent=new Date().toLocaleString('zh-TW'),1000);refreshAll();setInterval(loadMarket,60000);setInterval(loadNews,300000);setInterval(loadFutures,60000);
+function scoreOrNA(v,max){return (v===null||v===undefined)?`<span class="gold">Unavailable</span>`:`${v}/${max}`}
+function statusPill(s){let c=s==='符合'?'up':s==='不符合'?'dn':'gold';return `<span class="pill ${c}">${esc(s||'資料不足')}</span>`}
+function partialAnalysisHtml(a,mode){
+ if(!a)return '<span class="gold">分析模型 Unavailable；公司/行情/新聞仍可獨立顯示。</span>';
+ let isO=mode==='overnight', m=isO?a.overnight:a.swing;
+ let f=isO?a.fundamental.overnight_score:a.fundamental.swing_score;
+ let t=isO?a.technical.overnight_score:a.technical.swing_score;
+ let c=isO?a.chips.overnight_score:a.chips.swing_score;
+ let fm=isO?20:35,tm=isO?40:35,cm=isO?40:30;
+ let plan=(!isO&&m.plan)?`<div>觀察持有 ${esc(m.plan.holding)}｜布局 ${m.plan.entry[0]}～${m.plan.entry[1]}｜目標一 ${m.plan.target1}｜目標二 ${m.plan.target2}｜失效 ${m.plan.stop}｜RR ${m.plan.rr1}</div>`:'';
+ return `<div><b>${isO?'隔日沖':'波段'}狀態</b> ${statusPill(m.status)}｜已取得資料評分 ${m.score}/100｜完整度 ${m.completeness}%</div>
+ <div>基本面 ${scoreOrNA(f,fm)}｜技術面 ${scoreOrNA(t,tm)}｜籌碼面 ${scoreOrNA(c,cm)}</div>${plan}
+ <div class="note">缺少：${esc((a.missing||[]).join('、')||'無')}。缺少的欄位不以 0 分代替，也不使其他成功資料消失。</div>`;
+}
+
+async function searchSwing(){
+ let q=$('#swingSearch').value.trim();if(!q)return;
+ $('#swingSearchInfo').textContent='分析中…';$('#swingSearchNews').textContent='搜尋事件中…';
+ let x=null;
+ try{
+  let s=await getJson('/api/company/search?q='+encodeURIComponent(q));
+  if(!s.rows?.length){$('#swingSearchInfo').textContent='查無上市／上櫃公司資料';$('#swingSearchNews').textContent='—';return}
+  x=s.rows[0];
+  if(s.rows.length>1&&!/^\d+$/.test(q)){
+   $('#swingSearchInfo').innerHTML='<b>找到多筆，請用股票代號精確搜尋：</b><br>'+s.rows.slice(0,10).map(y=>`${esc(y.code)} ${esc(y.name)}（${esc(y.market)}）`).join('<br>');return
+  }
+  $('#swingSearchInfo').innerHTML=`<div class="big">${esc(x.code)} ${esc(x.name)}</div><div>${esc(x.market)}｜${esc(x.industry||'Unknown')}</div><div class="gold">分析資料載入中…</div>`;
+ }catch(e){$('#swingSearchInfo').innerHTML=`<span class="gold">公司資料 Unavailable：${esc(e.message)}</span>`;return}
+ try{
+  let ctx=await getJson('/api/stock/analysis?code='+encodeURIComponent(x.code)),m=ctx.quote;
+  let quote=m?`<div><b>最新價格 ${m.price??'—'}</b>｜漲跌 ${m.change>=0?'+':''}${m.change??'—'}（${m.pct>=0?'+':''}${m.pct??'—'}%）｜開 ${m.open??'—'} 高 ${m.high??'—'} 低 ${m.low??'—'}</div>`:'<div class="gold">行情 Unavailable</div>';
+  $('#swingSearchInfo').innerHTML=`<div class="big">${esc(x.code)} ${esc(x.name)}</div><div>${esc(x.market)}｜${esc(x.industry||'Unknown')}</div>${quote}${partialAnalysisHtml(ctx.analysis,'swing')}`;
+ }catch(e){$('#swingSearchInfo').innerHTML+=`<div class="gold">分析 API Unavailable：${esc(e.message)}</div>`}
+ try{
+  let n=await getJson('/api/news/stock?code='+encodeURIComponent(x.code)+'&name='+encodeURIComponent(x.name)+'&industry='+encodeURIComponent(x.industry||'')+'&market='+encodeURIComponent(x.market||''));
+  $('#swingSearchNews').innerHTML=n.rows?.length?n.rows.map(z=>`<div class="news"><span class="pill ${z.sentiment==='偏多'?'up':z.sentiment==='偏空'?'dn':'gold'}">${esc(z.sentiment)}</span> <span class="pill">${esc(z.category||'新聞')}</span> <a href="${esc(z.url)}" target="_blank" rel="noopener"><b>${esc(z.title)}</b></a><div class="note">${esc(z.relation||'可能相關')}｜${esc(z.source)}｜${esc(z.published)}</div></div>`).join(''):'目前查無可驗證的新事件';
+ }catch(e){$('#swingSearchNews').innerHTML=`<span class="gold">新聞來源暫時 Unavailable，不影響行情與波段分析。</span>`}
+}
+async function searchStock(){
+ let q=$('#stockSearch').value.trim();if(!q)return;
+ $('#stockInfo').textContent='搜尋中…';$('#stockNews').textContent='搜尋中…';$('#overnightAnalysis').textContent='計算中…';$('#swingAnalysis').textContent='計算中…';
+ let x=null;
+ try{
+  let j=await getJson('/api/company/search?q='+encodeURIComponent(q));
+  if(!j.rows?.length){$('#stockInfo').textContent='查無上市／上櫃公司資料';$('#stockNews').textContent='—';$('#overnightAnalysis').textContent='—';$('#swingAnalysis').textContent='—';return}
+  x=j.rows[0];$('#stockInfo').innerHTML=`<div class="big">${esc(x.code)} ${esc(x.name)}</div><div>${esc(x.market)}｜產業：${esc(x.industry||'Unknown')}</div><div class="note">核心業務：${esc(x.business||'Unknown')}</div>`;
+ }catch(e){$('#stockInfo').innerHTML=`<span class="gold">公司資料 Unavailable：${esc(e.message)}</span>`;return}
+ try{
+  let ctx=await getJson('/api/stock/analysis?code='+encodeURIComponent(x.code)),m=ctx.quote;
+  $('#stockInfo').innerHTML=`<div class="big">${esc(x.code)} ${esc(x.name)}</div><div>${esc(x.market)}｜產業：${esc(x.industry||'Unknown')}</div>${m?`<div><b>最新價格 ${m.price??'—'}</b>｜日內漲跌 <span class="${(m.pct||0)>=0?'up':'dn'}">${m.change>=0?'+':''}${m.change??'—'}（${m.pct>=0?'+':''}${m.pct??'—'}%）</span></div><div>開 ${m.open??'—'}｜高 ${m.high??'—'}｜低 ${m.low??'—'}｜量 ${m.volume??'—'}｜行情時間 ${esc(m.date||'')} ${esc(m.time||'')}</div>`:'<div class="gold">最新行情 Unavailable</div>'}<div class="note">核心業務：${esc(x.business||'Unknown')}</div>`;
+  $('#overnightAnalysis').innerHTML=partialAnalysisHtml(ctx.analysis,'overnight');
+  $('#swingAnalysis').innerHTML=partialAnalysisHtml(ctx.analysis,'swing');
+ }catch(e){$('#overnightAnalysis').innerHTML=`<span class="gold">分析資料 Unavailable：${esc(e.message)}</span>`;$('#swingAnalysis').innerHTML='<span class="gold">波段模型暫時無法計算；公司資料仍保留。</span>'}
+ try{
+  let n=await getJson('/api/news/stock?code='+encodeURIComponent(x.code)+'&name='+encodeURIComponent(x.name)+'&industry='+encodeURIComponent(x.industry||'')+'&market='+encodeURIComponent(x.market||''));
+  $('#stockNews').innerHTML=n.rows?.length?n.rows.map(z=>`<div class="news"><span class="pill ${z.sentiment==='偏多'?'up':z.sentiment==='偏空'?'dn':'gold'}">${esc(z.sentiment)}</span> <span class="pill">${esc(z.category||'新聞')}</span> <a href="${esc(z.url)}" target="_blank" rel="noopener"><b>${esc(z.title)}</b></a><div class="note">${esc(z.relation||'可能相關')}｜${esc(z.sentiment_reason)}｜${esc(z.source)}｜${esc(z.published)}</div></div>`).join(''):'目前查無可驗證的新事件';
+ }catch(e){$('#stockNews').innerHTML='<span class="gold">新聞來源暫時 Unavailable；不影響其他分析欄位。</span>'}
+}
 </script></body></html>

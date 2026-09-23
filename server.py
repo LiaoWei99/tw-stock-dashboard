@@ -59,7 +59,7 @@ def manifest(): return send_from_directory(BASE,'manifest.webmanifest',mimetype=
 @app.get('/sw.js')
 def sw(): return send_from_directory(BASE,'sw.js',mimetype='application/javascript')
 @app.get('/health')
-def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'7.0-swing-search-news-engine'})
+def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'8.0-partial-data-resilience'})
 
 @app.get('/api/twse/realtime')
 def realtime():
@@ -276,9 +276,25 @@ def institutional_row(code, market='上市'):
     except Exception: pass
     return None
 
-def twse_history(code, months=4):
-    # Listed-stock daily history. Failure returns [] rather than inventing data.
+def market_history(code, market='上市', months=4):
+    # Official daily history. Each source fails independently and returns [].
     import datetime
+    if market=='上櫃':
+        out=[]
+        try:
+            rows=get_json('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes')
+            for r in rows:
+                rc=str(r.get('SecuritiesCompanyCode') or _field(r,['證券代號','股票代號','公司代號'])).strip()
+                if rc!=code: continue
+                close=n(r.get('Close') or _field(r,['收盤價']))
+                op=n(r.get('Open') or _field(r,['開盤價']))
+                hi=n(r.get('High') or _field(r,['最高價']))
+                lo=n(r.get('Low') or _field(r,['最低價']))
+                vol=n(r.get('TradingShares') or _field(r,['成交股數']))
+                ds=str(r.get('Date') or _field(r,['日期'])).strip()
+                if close: out.append({'date':ds,'open':op,'high':hi,'low':lo,'close':close,'volume':vol})
+        except Exception: pass
+        return out
     out=[]; today=datetime.date.today(); seen=set()
     for i in range(months):
         y=today.year; m=today.month-i
@@ -300,7 +316,7 @@ def _norm(points, available, target):
 def analyst_model(company, quote):
     code=company['code']; market=company['market']; val=valuation_row(code,market)
     inst=institutional_row(code,market)
-    hist=twse_history(code,4) if market=='上市' else []
+    hist=market_history(code,market,4)
     # Fundamental: 20 overnight / 35 swing. Only verified fields count.
     fp=0; fa=0; freasons=[]
     if company.get('industry'): fp+=4; fa+=4; freasons.append('官方產業分類可辨識')
@@ -358,14 +374,18 @@ def analyst_model(company, quote):
     f20=_norm(fp,fa,20); t40=_norm(tp,ta,40); c40=_norm(cp,ca,40)
     avail_o=(20 if f20 is not None else 0)+(40 if t40 is not None else 0)+(40 if c40 is not None else 0)
     total_o=sum(x for x in [f20,t40,c40] if x is not None)
-    comp_o=round((fa/20*20 if fa else 0)+(ta/40*40 if ta else 0)+(ca/40*40 if ca else 0))
+    comp_o=round(min(100, fa/20*20 + ta/40*40 + ca/40*40))
     # Keep completeness strict; recommendation requires >=60% and technical/chip evidence.
-    overnight_ok=comp_o>=60 and total_o>=65 and t40 is not None and t40>=24 and c40 is not None and c40>=20
+    overnight_enough=comp_o>=60 and t40 is not None and c40 is not None
+    overnight_ok=overnight_enough and total_o>=65 and t40>=24 and c40>=20
+    overnight_status='符合' if overnight_ok else ('不符合' if overnight_enough else '資料不足')
     # Swing 35/35/30 reweight from same verified evidence; history is required.
     f35=_norm(fp,fa,35); t35=_norm(tp,ta,35); c30=_norm(cp,ca,30)
     total_s=sum(x for x in [f35,t35,c30] if x is not None)
-    comp_s=round((fa/20*35 if fa else 0)+(ta/40*35 if ta else 0)+(ca/40*30 if ca else 0))
-    swing_ok=(not overnight_ok) and len(hist)>=20 and comp_s>=60 and total_s>=62 and t35 is not None and t35>=20
+    comp_s=round(min(100, fa/20*35 + ta/40*35 + ca/40*30))
+    swing_enough=len(hist)>=20 and comp_s>=60 and t35 is not None
+    swing_ok=(not overnight_ok) and swing_enough and total_s>=62 and t35>=20
+    swing_status='符合' if swing_ok else ('不符合' if swing_enough else '資料不足')
     # Price plan only when enough daily history exists.
     plan=None
     if swing_ok and quote and quote.get('price') and len(hist)>=20:
@@ -381,8 +401,8 @@ def analyst_model(company, quote):
       'fundamental':{'overnight_score':f20,'swing_score':f35,'available_points':fa,'reasons':freasons,'valuation':val},
       'technical':{'overnight_score':t40,'swing_score':t35,'available_points':ta,'reasons':treasons,'ma20':round(ma20,2) if ma20 else None,'ma60':round(ma60,2) if ma60 else None,'return20':round(ret20,2) if ret20 is not None else None},
       'chips':{'overnight_score':c40,'swing_score':c30,'available_points':ca,'reasons':creasons,'institutional':inst},
-      'overnight':{'score':total_o,'completeness':min(100,comp_o),'eligible':overnight_ok,'threshold':'完整度>=60、總分>=65、技術>=24/40、籌碼>=20/40'},
-      'swing':{'score':total_s,'completeness':min(100,comp_s),'eligible':swing_ok,'threshold':'隔日沖不符合後，至少20日歷史、完整度>=60、總分>=62、技術>=20/35','plan':plan},
+      'overnight':{'score':total_o,'completeness':min(100,comp_o),'eligible':overnight_ok,'status':overnight_status,'threshold':'完整度>=60、總分>=65、技術>=24/40、籌碼>=20/40'},
+      'swing':{'score':total_s,'completeness':min(100,comp_s),'eligible':swing_ok,'status':swing_status,'threshold':'隔日沖不符合後，至少20日歷史、完整度>=60、總分>=62、技術>=20/35','plan':plan},
       'missing':[x for x,ok in [('估值/基本面量化',bool(val)),('20日以上歷史K線',len(hist)>=20),('三大法人籌碼',bool(inst))] if not ok]
     }
 
@@ -393,9 +413,13 @@ def stock_analysis():
     try:
         matches=[x for x in company_rows() if x['code']==code]
         if not matches:return jsonify({'ok':False,'error':'stock code not found'}),404
-        c=matches[0]; q=None
+        c=matches[0]; q=None; errors=[]
         try:q=mis_quote(code,c['market'])
-        except Exception: pass
-        a=analyst_model(c,q)
-        return jsonify({'ok':True,'company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'analysis':a,'ts':int(time.time()*1000)})
+        except Exception as e: errors.append({'part':'行情','error':str(e)[:180]})
+        try:
+            a=analyst_model(c,q)
+        except Exception as e:
+            errors.append({'part':'分析模型','error':str(e)[:180]}); a=None
+        return jsonify({'ok':True,'partial':bool(errors),'company':{k:v for k,v in c.items() if k!='raw'},
+                        'quote':q,'analysis':a,'errors':errors,'ts':int(time.time()*1000)})
     except Exception as e:return jsonify({'ok':False,'error':str(e)}),502
