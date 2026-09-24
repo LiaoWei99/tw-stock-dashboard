@@ -15,22 +15,60 @@ def n(v):
         return float(x) if x not in ('','--','---') else 0.0
     except:return 0.0
 
-def company_rows():
-    # Listed and OTC use their own official OpenAPI hosts. Stock code is the primary key.
-    out=[]; sources=[
+_COMPANY_CACHE={'rows':None,'ts':0}
+_COMPANY_LOCK=threading.Lock()
+_COMPANY_TTL=21600
+
+def _load_company_rows():
+    rows=[]
+    sources=[
       ('上市','https://openapi.twse.com.tw/v1/opendata/t187ap03_L'),
-      ('上櫃','https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O')]
-    for market, url in sources:
+      ('上櫃','https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O')
+    ]
+    for market,url in sources:
         try:
-            for r in get_json(url):
-                code=next((str(r.get(k,'')).strip() for k in r if '公司代號' in k or k.lower() in ('code','companycode','securitiescompanycode')), '')
-                name=next((str(r.get(k,'')).strip() for k in r if '公司簡稱' in k), '') or next((str(r.get(k,'')).strip() for k in r if '公司名稱' in k), '')
-                industry=next((str(r.get(k,'')).strip() for k in r if '產業別' in k or '產業類別' in k), '')
-                business=next((str(r.get(k,'')).strip() for k in r if '主要經營業務' in k or '主要業務' in k), '')
-                if code and code.isdigit(): out.append({'code':code,'name':name,'industry':industry,'business':business,'market':market,'raw':r})
+            data=get_json(url)
+            for r in data:
+                code=str(r.get('公司代號') or r.get('SecuritiesCompanyCode') or '').strip()
+                name=str(r.get('公司簡稱') or r.get('公司名稱') or r.get('CompanyName') or '').strip()
+                if not code or not name: continue
+                rows.append({'code':code,'name':name,'market':market,
+                  'industry':str(r.get('產業別') or r.get('產業類別') or r.get('Industry') or '').strip(),
+                  'business':str(r.get('主要經營業務') or r.get('營業項目') or r.get('BusinessScope') or '').strip(),
+                  'raw':r})
         except Exception:
-            pass
-    return out
+            continue
+    return rows
+
+def company_rows(force=False):
+    now=time.time()
+    cached=_COMPANY_CACHE.get('rows')
+    if cached and not force and now-_COMPANY_CACHE['ts'] < _COMPANY_TTL:
+        return cached
+    if not _COMPANY_LOCK.acquire(blocking=False):
+        return cached or []
+    try:
+        fresh=_load_company_rows()
+        if fresh:
+            _COMPANY_CACHE['rows']=fresh; _COMPANY_CACHE['ts']=now
+            return fresh
+        return cached or []
+    finally:
+        _COMPANY_LOCK.release()
+
+def company_by_code_fast(code):
+    rows=company_rows()
+    for x in rows:
+        if x['code']==code:return x
+    # Direct quote fallback means a numeric code can still be searched even if company master is unavailable.
+    if code.isdigit() and 4 <= len(code) <= 6:
+        for market in ('上市','上櫃'):
+            try:
+                q=mis_quote(code,market)
+                if q and q.get('name') and q.get('price') is not None:
+                    return {'code':code,'name':q.get('name') or code,'market':market,'industry':'','business':'','raw':{}}
+            except Exception: pass
+    return None
 
 def mis_quote(code, market):
     ex='tse' if market=='上市' else 'otc'
@@ -59,7 +97,7 @@ def manifest(): return send_from_directory(BASE,'manifest.webmanifest',mimetype=
 @app.get('/sw.js')
 def sw(): return send_from_directory(BASE,'sw.js',mimetype='application/javascript')
 @app.get('/health')
-def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'9.1-nonblocking'})
+def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'9.2-cached-search'})
 
 @app.get('/api/twse/realtime')
 def realtime():
@@ -85,20 +123,14 @@ def market_top():
 @app.get('/api/company/search')
 def company_search():
     q=request.args.get('q','').strip()
-    if not q:return jsonify({'ok':False,'error':'q required'}),400
-    try:
-        rows=company_rows(); ql=q.lower()
-        if q.isdigit():
-            hits=[x for x in rows if x['code']==q]
-        else:
-            exact=[x for x in rows if x['name'].lower()==ql]
-            fuzzy=[x for x in rows if ql in x['name'].lower() or ql in x['industry'].lower() or ql in x['business'].lower()]
-            seen=set(); hits=[]
-            for x in exact+fuzzy:
-                k=(x['market'],x['code'])
-                if k not in seen: seen.add(k); hits.append(x)
-        return jsonify({'ok':True,'source':'TWSE OpenAPI 公司基本資料','match':'exact-code' if q.isdigit() else 'name-industry-business','rows':hits[:20]})
-    except Exception as e:return jsonify({'ok':False,'error':str(e)}),502
+    if not q:return jsonify({'ok':True,'rows':[]})
+    if q.isdigit():
+        c=company_by_code_fast(q)
+        return jsonify({'ok':True,'rows':[{k:v for k,v in c.items() if k!='raw'}] if c else []})
+    rows=company_rows()
+    ql=q.lower()
+    out=[{k:v for k,v in x.items() if k!='raw'} for x in rows if ql in x['name'].lower() or ql in x['code'].lower()]
+    return jsonify({'ok':True,'rows':out[:20],'cached':bool(_COMPANY_CACHE.get('rows'))})
 
 @app.get('/api/stock/context')
 def stock_context():
@@ -447,8 +479,7 @@ def peer_snapshot(c,limit=6):
         if len(out)>=limit:break
     return out
 def _company_by_code(code):
-    m=[x for x in company_rows() if x['code']==code]
-    return m[0] if m else None
+    return company_by_code_fast(code)
 
 @app.get('/api/stock/summary')
 def stock_summary():
@@ -487,6 +518,11 @@ def stock_research():
     code=request.args.get('code','').strip(); c=_company_by_code(code)
     if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
     q,_=safe_call(lambda:mis_quote(code,c['market']))
-    return jsonify({'ok':True,'version':'9.1-nonblocking','company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'note':'heavy modules load independently'})
+    return jsonify({'ok':True,'version':'9.2-cached-search','company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'note':'heavy modules load independently'})
+
+def _warm_company_cache():
+    try: company_rows(force=True)
+    except Exception: pass
+threading.Thread(target=_warm_company_cache,daemon=True).start()
 
 if __name__=='__main__': app.run(host='0.0.0.0',port=int(os.getenv('PORT','8787')),debug=False)
