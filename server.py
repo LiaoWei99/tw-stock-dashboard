@@ -7,7 +7,7 @@ BASE=os.path.dirname(__file__)
 
 def fetch(url, accept='application/json'):
     req=Request(url,headers={'User-Agent':'Mozilla/5.0 TW-Stock-Dashboard/3.0','Accept':accept})
-    with urlopen(req,timeout=15) as r: return r.read()
+    with urlopen(req,timeout=5) as r: return r.read()
 def get_json(url): return json.loads(fetch(url).decode('utf-8'))
 def n(v):
     try:
@@ -59,7 +59,7 @@ def manifest(): return send_from_directory(BASE,'manifest.webmanifest',mimetype=
 @app.get('/sw.js')
 def sw(): return send_from_directory(BASE,'sw.js',mimetype='application/javascript')
 @app.get('/health')
-def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'9.0-ai-research-terminal'})
+def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'9.1-nonblocking'})
 
 @app.get('/api/twse/realtime')
 def realtime():
@@ -446,17 +446,47 @@ def peer_snapshot(c,limit=6):
         if v or q:out.append({'code':p['code'],'name':p['name'],'price':(q or {}).get('price'),'pe':(v or {}).get('pe'),'pb':(v or {}).get('pb'),'yield':(v or {}).get('yield')})
         if len(out)>=limit:break
     return out
+def _company_by_code(code):
+    m=[x for x in company_rows() if x['code']==code]
+    return m[0] if m else None
+
+@app.get('/api/stock/summary')
+def stock_summary():
+    code=request.args.get('code','').strip(); c=_company_by_code(code)
+    if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
+    q,e=safe_call(lambda:mis_quote(code,c['market'])); v,e2=safe_call(lambda:valuation_row(code,c['market']))
+    return jsonify({'ok':True,'company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'valuation':v,'source_status':{'公司':'OK','行情':'OK' if q else 'Unavailable','估值':'OK' if v else 'Unavailable'}})
+
+@app.get('/api/stock/technical')
+def stock_technical():
+    code=request.args.get('code','').strip(); c=_company_by_code(code)
+    if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
+    q,_=safe_call(lambda:mis_quote(code,c['market'])); t,e=safe_call(lambda:technical_snapshot(c,q),{'status':'資料不足'})
+    return jsonify({'ok':True,'technical':t,'status':'OK' if t.get('status')=='ok' else 'Unavailable','error':e})
+
+@app.get('/api/stock/model')
+def stock_model():
+    code=request.args.get('code','').strip(); c=_company_by_code(code)
+    if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
+    q,_=safe_call(lambda:mis_quote(code,c['market'])); a,e=safe_call(lambda:analyst_model(c,q))
+    return jsonify({'ok':True,'analysis':a,'status':'OK' if a else 'Unavailable','error':e})
+
+@app.get('/api/stock/peers')
+def stock_peers():
+    code=request.args.get('code','').strip(); c=_company_by_code(code)
+    if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
+    out=[]
+    for x in [x for x in company_rows() if x['code']!=code and x.get('industry')==c.get('industry')][:8]:
+        v,_=safe_call(lambda x=x:valuation_row(x['code'],x['market']))
+        if v:out.append({'code':x['code'],'name':x['name'],'pe':v.get('pe'),'pb':v.get('pb'),'yield':v.get('yield')})
+        if len(out)>=5:break
+    return jsonify({'ok':True,'rows':out,'status':'OK' if out else 'Unavailable'})
+
 @app.get('/api/stock/research')
 def stock_research():
-    code=request.args.get('code','').strip()
-    if not code:return jsonify({'ok':False,'error':'code required'}),400
-    m=[x for x in company_rows() if x['code']==code]
-    if not m:return jsonify({'ok':False,'error':'stock code not found'}),404
-    c=m[0];errs=[];q,e=safe_call(lambda:mis_quote(code,c['market']));errs += ([{'part':'quote','error':e}] if e else [])
-    a,e=safe_call(lambda:analyst_model(c,q));errs += ([{'part':'analysis','error':e}] if e else [])
-    t,e=safe_call(lambda:technical_snapshot(c,q),{'status':'資料不足'});errs += ([{'part':'technical','error':e}] if e else [])
-    nw,e=safe_call(lambda:layered_stock_news(code,c['name'],c.get('industry',''),c['market']),[]);errs += ([{'part':'news','error':e}] if e else [])
-    ps,e=safe_call(lambda:peer_snapshot(c),[]);errs += ([{'part':'peers','error':e}] if e else [])
-    return jsonify({'ok':True,'version':'9.0-ai-research-terminal','company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'analysis':a,'technical':t,'news':nw,'peers':ps,'errors':errs,'source_status':{'公司':'OK','行情':'OK' if q else 'Unavailable','評分':'OK' if a else 'Unavailable','技術':'OK' if t.get('status')=='ok' else 'Unavailable','新聞':'OK' if nw else 'No verified event','同業':'OK' if ps else 'Unavailable'}})
+    code=request.args.get('code','').strip(); c=_company_by_code(code)
+    if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
+    q,_=safe_call(lambda:mis_quote(code,c['market']))
+    return jsonify({'ok':True,'version':'9.1-nonblocking','company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'note':'heavy modules load independently'})
 
 if __name__=='__main__': app.run(host='0.0.0.0',port=int(os.getenv('PORT','8787')),debug=False)
