@@ -59,7 +59,7 @@ def manifest(): return send_from_directory(BASE,'manifest.webmanifest',mimetype=
 @app.get('/sw.js')
 def sw(): return send_from_directory(BASE,'sw.js',mimetype='application/javascript')
 @app.get('/health')
-def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'8.0-partial-data-resilience'})
+def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'9.0-ai-research-terminal'})
 
 @app.get('/api/twse/realtime')
 def realtime():
@@ -231,7 +231,6 @@ def twse_openapi(dataset):
 @app.get('/api/taifex/status')
 def taifex_status():return jsonify({'ok':True,'source':'TAIFEX','mode':'official-daily','note':'Tick-level realtime requires licensed feed.'})
 
-if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.getenv('PORT','8787')),debug=False)
 
 # --- V6 analyst scoring layer ---
 def _pick(r, includes):
@@ -423,3 +422,41 @@ def stock_analysis():
         return jsonify({'ok':True,'partial':bool(errors),'company':{k:v for k,v in c.items() if k!='raw'},
                         'quote':q,'analysis':a,'errors':errors,'ts':int(time.time()*1000)})
     except Exception as e:return jsonify({'ok':False,'error':str(e)}),502
+
+
+def safe_call(fn,default=None):
+    try:return fn(),None
+    except Exception as e:return default,str(e)[:180]
+def technical_snapshot(c,q):
+    h=market_history(c['code'],c['market'],12)
+    if not h:return {'status':'資料不足','history_days':0}
+    cl=[x['close'] for x in h if x.get('close')];vo=[x.get('volume') or 0 for x in h if x.get('close')]
+    def ma(k):return round(sum(cl[-k:])/k,2) if len(cl)>=k else None
+    ms={str(k):ma(k) for k in [5,10,20,60,120,240]};px=(q or {}).get('price') or cl[-1];r=h[-20:]
+    lo=[x['low'] for x in r if x.get('low')];hi=[x['high'] for x in r if x.get('high')];av=round(sum(vo[-20:])/20,0) if len(vo)>=20 else None
+    st='整理'
+    if ms['20'] and ms['60']:st='多頭排列／偏強' if px>ms['20']>ms['60'] else ('空頭排列／偏弱' if px<ms['20']<ms['60'] else ('站回月線／整理偏強' if px>ms['20'] else '月線下方／整理偏弱'))
+    return {'status':'ok','history_days':len(h),'ma':ms,'support':round(min(lo[-10:]),2) if lo else None,'resistance':round(max(hi),2) if hi else None,'volume_ratio20':round(vo[-1]/av,2) if av else None,'state':st,'note':'純技術現況描述，不預測漲跌。'}
+def peer_snapshot(c,limit=6):
+    out=[]
+    for p in [x for x in company_rows() if x['code']!=c['code'] and x.get('industry')==c.get('industry')][:30]:
+        v=valuation_row(p['code'],p['market']);q=None
+        try:q=mis_quote(p['code'],p['market'])
+        except:pass
+        if v or q:out.append({'code':p['code'],'name':p['name'],'price':(q or {}).get('price'),'pe':(v or {}).get('pe'),'pb':(v or {}).get('pb'),'yield':(v or {}).get('yield')})
+        if len(out)>=limit:break
+    return out
+@app.get('/api/stock/research')
+def stock_research():
+    code=request.args.get('code','').strip()
+    if not code:return jsonify({'ok':False,'error':'code required'}),400
+    m=[x for x in company_rows() if x['code']==code]
+    if not m:return jsonify({'ok':False,'error':'stock code not found'}),404
+    c=m[0];errs=[];q,e=safe_call(lambda:mis_quote(code,c['market']));errs += ([{'part':'quote','error':e}] if e else [])
+    a,e=safe_call(lambda:analyst_model(c,q));errs += ([{'part':'analysis','error':e}] if e else [])
+    t,e=safe_call(lambda:technical_snapshot(c,q),{'status':'資料不足'});errs += ([{'part':'technical','error':e}] if e else [])
+    nw,e=safe_call(lambda:layered_stock_news(code,c['name'],c.get('industry',''),c['market']),[]);errs += ([{'part':'news','error':e}] if e else [])
+    ps,e=safe_call(lambda:peer_snapshot(c),[]);errs += ([{'part':'peers','error':e}] if e else [])
+    return jsonify({'ok':True,'version':'9.0-ai-research-terminal','company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'analysis':a,'technical':t,'news':nw,'peers':ps,'errors':errs,'source_status':{'公司':'OK','行情':'OK' if q else 'Unavailable','評分':'OK' if a else 'Unavailable','技術':'OK' if t.get('status')=='ok' else 'Unavailable','新聞':'OK' if nw else 'No verified event','同業':'OK' if ps else 'Unavailable'}})
+
+if __name__=='__main__': app.run(host='0.0.0.0',port=int(os.getenv('PORT','8787')),debug=False)
