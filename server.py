@@ -16,16 +16,15 @@ def n(v):
         return float(x) if x not in ('','--','---') else 0.0
     except:return 0.0
 
-_COMPANY_CACHE={'rows':None,'ts':0}
+_COMPANY_CACHE={'rows':[],'ts':0}
+_COMPANY_INDEX={}
 _COMPANY_LOCK=threading.Lock()
 _COMPANY_TTL=21600
 
 def _load_company_rows():
+    # Remote refresh: background only. Request handlers never call this.
     rows=[]
-    sources=[
-      ('上市','https://openapi.twse.com.tw/v1/opendata/t187ap03_L'),
-      ('上櫃','https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O')
-    ]
+    sources=[('上市','https://openapi.twse.com.tw/v1/opendata/t187ap03_L'),('上櫃','https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O')]
     for market,url in sources:
         try:
             data=get_json(url)
@@ -33,53 +32,61 @@ def _load_company_rows():
                 code=str(r.get('公司代號') or r.get('SecuritiesCompanyCode') or '').strip()
                 name=str(r.get('公司簡稱') or r.get('公司名稱') or r.get('CompanyName') or '').strip()
                 if not code or not name: continue
-                rows.append({'code':code,'name':name,'market':market,
-                  'industry':str(r.get('產業別') or r.get('產業類別') or r.get('Industry') or '').strip(),
-                  'business':str(r.get('主要經營業務') or r.get('營業項目') or r.get('BusinessScope') or '').strip(),
-                  'raw':r})
-        except Exception:
-            continue
+                rows.append({'code':code,'name':name,'market':market,'industry':str(r.get('產業別') or r.get('產業類別') or r.get('Industry') or '').strip(),'business':str(r.get('主要經營業務') or r.get('營業項目') or r.get('BusinessScope') or '').strip(),'raw':r})
+        except Exception: continue
     return rows
 
-def company_rows(force=False):
-    now=time.time()
-    cached=_COMPANY_CACHE.get('rows')
-    if cached and not force and now-_COMPANY_CACHE['ts'] < _COMPANY_TTL:
-        return cached
-    if not _COMPANY_LOCK.acquire(blocking=False):
-        return cached or []
-    try:
-        fresh=_load_company_rows()
-        if fresh:
-            _COMPANY_CACHE['rows']=fresh; _COMPANY_CACHE['ts']=now
-            return fresh
-        return cached or []
-    finally:
-        _COMPANY_LOCK.release()
+def _install_company_rows(rows):
+    if not rows:return False
+    with _COMPANY_LOCK:
+        _COMPANY_CACHE['rows']=rows; _COMPANY_CACHE['ts']=time.time()
+        _COMPANY_INDEX.clear(); _COMPANY_INDEX.update({x['code']:x for x in rows if x.get('code')})
+    return True
 
-def company_by_code_fast(code):
-    rows=company_rows()
-    for x in rows:
-        if x['code']==code:return x
-    # Direct quote fallback means a numeric code can still be searched even if company master is unavailable.
-    if code.isdigit() and 4 <= len(code) <= 6:
-        for market in ('上市','上櫃'):
-            try:
-                q=mis_quote(code,market)
-                if q and q.get('name') and q.get('price') is not None:
-                    return {'code':code,'name':q.get('name') or code,'market':market,'industry':'','business':'','raw':{}}
-            except Exception: pass
+def company_rows():
+    # Memory only: no network I/O on the request path.
+    return list(_COMPANY_CACHE.get('rows') or [])
+
+def cached_company(code): return _COMPANY_INDEX.get(str(code))
+
+def _parse_mis_row(r,market):
+    def num(v):
+        try:
+            x=str(v if v is not None else '').replace(',','').replace('+','').strip()
+            if x in ('','--','---','-'):return None
+            return float(x)
+        except:return None
+    code=str(r.get('c') or '').strip(); last=num(r.get('z')); prev=num(r.get('y'))
+    change=(last-prev) if last is not None and prev is not None else None
+    return {'code':code,'name':r.get('n') or r.get('nf') or '','market':market,'price':last,'prev_close':prev,'change':round(change,2) if change is not None else None,'pct':round(change/prev*100,2) if change is not None and prev else None,'open':num(r.get('o')),'high':num(r.get('h')),'low':num(r.get('l')),'volume':num(r.get('v')),'time':r.get('t') or '','date':r.get('d') or '','source':'TWSE MIS','price_status':'last_trade' if last is not None else 'Unavailable','note':None if last is not None else 'MIS 未提供最後成交價；不以昨收或推估值代替。'}
+
+def discover_quote(code):
+    chans=f'tse_{code}.tw|otc_{code}.tw'
+    url='https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch='+quote(chans,safe='|_.')+'&json=1&delay=0'
+    data=get_json(url)
+    for r in data.get('msgArray') or []:
+        if str(r.get('c') or '').strip()!=str(code):continue
+        ex=str(r.get('ex') or r.get('ch') or '').lower(); market='上櫃' if ('otc' in ex or str(r.get('ch') or '').lower().startswith('otc_')) else '上市'
+        q=_parse_mis_row(r,market)
+        if q.get('name') or q.get('prev_close') is not None or q.get('price') is not None:return q
     return None
 
-def mis_quote(code, market):
+def company_by_code_fast(code):
+    c=cached_company(code)
+    if c:return c
+    if code.isdigit() and 4<=len(code)<=6:
+        try:q=discover_quote(code)
+        except Exception:q=None
+        if q and q.get('name'):
+            return {'code':code,'name':q.get('name') or code,'market':q.get('market') or '','industry':'','business':'','raw':{}}
+    return None
+
+def mis_quote(code,market=None):
+    if not market:return discover_quote(code)
     ex='tse' if market=='上市' else 'otc'
     url='https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch='+quote(f'{ex}_{code}.tw',safe='|_.')+'&json=1&delay=0'
     data=get_json(url); rows=data.get('msgArray') or []
-    if not rows:return None
-    r=rows[0]; last=n(r.get('z')) or n(r.get('y')); prev=n(r.get('y')); change=last-prev if last and prev else 0
-    return {'code':code,'name':r.get('n') or r.get('nf') or '', 'market':market,'price':last or None,'prev_close':prev or None,
-      'change':round(change,2),'pct':round(change/prev*100,2) if prev else None,'open':n(r.get('o')) or None,'high':n(r.get('h')) or None,
-      'low':n(r.get('l')) or None,'volume':n(r.get('v')) or None,'time':r.get('t') or '', 'date':r.get('d') or '', 'source':'TWSE MIS'}
+    return _parse_mis_row(rows[0],market) if rows else None
 
 def sentiment(title):
     t=(title or '').lower()
@@ -98,7 +105,7 @@ def manifest(): return send_from_directory(BASE,'manifest.webmanifest',mimetype=
 @app.get('/sw.js')
 def sw(): return send_from_directory(BASE,'sw.js',mimetype='application/javascript')
 @app.get('/health')
-def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'9.2-cached-search'})
+def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'9.2.1-safe-market-data'})
 
 @app.get('/api/twse/realtime')
 def realtime():
@@ -138,9 +145,8 @@ def stock_context():
     code=request.args.get('code','').strip()
     if not code:return jsonify({'ok':False,'error':'code required'}),400
     try:
-        matches=[x for x in company_rows() if x['code']==code]
-        if not matches:return jsonify({'ok':False,'error':'stock code not found'}),404
-        c=matches[0]
+        c=company_by_code_fast(code)
+        if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
         q=None
         try:q=mis_quote(code,c['market'])
         except Exception:pass
@@ -443,9 +449,8 @@ def stock_analysis():
     code=request.args.get('code','').strip()
     if not code:return jsonify({'ok':False,'error':'code required'}),400
     try:
-        matches=[x for x in company_rows() if x['code']==code]
-        if not matches:return jsonify({'ok':False,'error':'stock code not found'}),404
-        c=matches[0]; q=None; errors=[]
+        c=company_by_code_fast(code)
+        if not c:return jsonify({'ok':False,'error':'stock code not found'}),404; q=None; errors=[]
         try:q=mis_quote(code,c['market'])
         except Exception as e: errors.append({'part':'行情','error':str(e)[:180]})
         try:
@@ -487,7 +492,7 @@ def stock_summary():
     code=request.args.get('code','').strip(); c=_company_by_code(code)
     if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
     q,e=safe_call(lambda:mis_quote(code,c['market'])); v,e2=safe_call(lambda:valuation_row(code,c['market']))
-    return jsonify({'ok':True,'company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'valuation':v,'source_status':{'公司':'OK','行情':'OK' if q else 'Unavailable','估值':'OK' if v else 'Unavailable'}})
+    return jsonify({'ok':True,'company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'valuation':v,'source_status':{'公司':'OK','行情':'OK' if q and q.get('price') is not None else 'Unavailable','估值':'OK' if v else 'Unavailable'}})
 
 @app.get('/api/stock/technical')
 def stock_technical():
@@ -519,10 +524,10 @@ def stock_research():
     code=request.args.get('code','').strip(); c=_company_by_code(code)
     if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
     q,_=safe_call(lambda:mis_quote(code,c['market']))
-    return jsonify({'ok':True,'version':'9.2-cached-search','company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'note':'heavy modules load independently'})
+    return jsonify({'ok':True,'version':'9.2.1-safe-market-data','company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'note':'heavy modules load independently'})
 
 def _warm_company_cache():
-    try: company_rows(force=True)
+    try: _install_company_rows(_load_company_rows())
     except Exception: pass
 threading.Thread(target=_warm_company_cache,daemon=True).start()
 
