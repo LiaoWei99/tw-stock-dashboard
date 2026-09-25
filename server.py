@@ -105,7 +105,7 @@ def manifest(): return send_from_directory(BASE,'manifest.webmanifest',mimetype=
 @app.get('/sw.js')
 def sw(): return send_from_directory(BASE,'sw.js',mimetype='application/javascript')
 @app.get('/health')
-def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'9.2.1-safe-market-data'})
+def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'9.2.2-valuation-sr-group'})
 
 @app.get('/api/twse/realtime')
 def realtime():
@@ -277,23 +277,40 @@ def _pick(r, includes):
         if all(s in k for s in includes): return v
     return None
 
+_VALUATION_CACHE={}
+_VALUATION_TTL=900
+
+def _valuation_rows(market):
+    key='twse' if market=='上市' else 'tpex'
+    now=time.time(); hit=_VALUATION_CACHE.get(key)
+    if hit and now-hit['ts']<_VALUATION_TTL:return hit['rows']
+    url=('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL' if market=='上市'
+         else 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis')
+    rows=get_json(url); _VALUATION_CACHE[key]={'ts':now,'rows':rows}; return rows
+
+def _num_or_none(v):
+    try:
+        x=str(v if v is not None else '').replace(',','').replace('%','').strip()
+        if x in ('','--','---','-','N/A','null','None'):return None
+        return float(x)
+    except:return None
+
 def valuation_row(code, market='上市'):
     try:
-        if market=='上市':
-            rows=get_json('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL')
-        else:
-            rows=get_json('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis')
-        for r in rows:
-            rc=str(r.get('Code') or r.get('SecuritiesCompanyCode') or r.get('SecuritiesCompanyCode') or _field(r,['證券代號','股票代號','公司代號'])).strip()
-            if rc!=code: continue
-            def gv(keys):
-                for k,v in r.items():
-                    if any(x.lower() in str(k).lower() for x in keys): 
-                        z=n(v); return z or None
-                return None
-            return {'pe':gv(['PEratio','本益比']),'pb':gv(['PBratio','股價淨值比']),'yield':gv(['DividendYield','殖利率']),
-                    'source':'TWSE/TPEX 官方估值資料'}
-    except Exception: pass
+        for r in _valuation_rows(market):
+            rc=str(r.get('Code') or r.get('SecuritiesCompanyCode') or r.get('SecuritiesCode') or _field(r,['證券代號','股票代號','公司代號'])).strip()
+            if rc!=code:continue
+            if market=='上市':
+                pe=_num_or_none(r.get('PEratio') or r.get('PERatio') or r.get('本益比'))
+                pb=_num_or_none(r.get('PBratio') or r.get('PBRatio') or r.get('股價淨值比'))
+                dy=_num_or_none(r.get('DividendYield') or r.get('DividendYield(%)') or r.get('殖利率(%)') or r.get('殖利率'))
+            else:
+                pe=_num_or_none(r.get('PriceEarningRatio') or r.get('PEratio') or r.get('本益比'))
+                pb=_num_or_none(r.get('PriceBookRatio') or r.get('PBratio') or r.get('股價淨值比'))
+                dy=_num_or_none(r.get('DividendYield') or r.get('DividendYield(%)') or r.get('殖利率(%)') or r.get('殖利率'))
+            return {'pe':pe,'pb':pb,'yield':dy,'date':str(r.get('Date') or r.get('日期') or ''),
+                    'source':'TWSE BWIBBU_ALL' if market=='上市' else 'TPEx tpex_mainboard_peratio_analysis'}
+    except Exception:pass
     return None
 
 def institutional_row(code, market='上市'):
@@ -465,16 +482,38 @@ def stock_analysis():
 def safe_call(fn,default=None):
     try:return fn(),None
     except Exception as e:return default,str(e)[:180]
+def stock_group(c):
+    industry=(c.get('industry') or '').strip(); business=(c.get('business') or '').strip(); text=(industry+' '+business).lower()
+    rules=[
+      (['記憶體','dram','nand'], '記憶體'),(['伺服器','server'], 'AI伺服器'),
+      (['光通訊','光纖'], '光通訊'),(['pcb','印刷電路','載板'], 'PCB／載板'),
+      (['散熱','thermal'], '散熱'),(['半導體','晶圓','積體電路','ic設計'], '半導體'),
+      (['銀行','金控','保險','證券'], '金融'),(['航運','海運','貨櫃'], '航運'),
+      (['營建','建設'], '營建'),(['生技','製藥','醫療'], '生技醫療')]
+    for keys,label in rules:
+        if any(k in text for k in keys):return label
+    return industry or 'Unavailable'
+
 def technical_snapshot(c,q):
     h=market_history(c['code'],c['market'],12)
-    if not h:return {'status':'資料不足','history_days':0}
-    cl=[x['close'] for x in h if x.get('close')];vo=[x.get('volume') or 0 for x in h if x.get('close')]
+    if not h:return {'status':'資料不足','history_days':0,'group':stock_group(c)}
+    cl=[x['close'] for x in h if x.get('close')]; vo=[x.get('volume') or 0 for x in h if x.get('close')]
     def ma(k):return round(sum(cl[-k:])/k,2) if len(cl)>=k else None
-    ms={str(k):ma(k) for k in [5,10,20,60,120,240]};px=(q or {}).get('price') or cl[-1];r=h[-20:]
-    lo=[x['low'] for x in r if x.get('low')];hi=[x['high'] for x in r if x.get('high')];av=round(sum(vo[-20:])/20,0) if len(vo)>=20 else None
+    ms={str(k):ma(k) for k in [5,10,20,60,120,240]}; px=(q or {}).get('price') or cl[-1]; r=h[-20:]
+    lows=[x['low'] for x in r if x.get('low')]; highs=[x['high'] for x in r if x.get('high')]; av=round(sum(vo[-20:])/20,0) if len(vo)>=20 else None
+    support=round(min(lows[-10:]),2) if lows else None; resistance=round(max(highs),2) if highs else None
     st='整理'
     if ms['20'] and ms['60']:st='多頭排列／偏強' if px>ms['20']>ms['60'] else ('空頭排列／偏弱' if px<ms['20']<ms['60'] else ('站回月線／整理偏強' if px>ms['20'] else '月線下方／整理偏弱'))
-    return {'status':'ok','history_days':len(h),'ma':ms,'support':round(min(lo[-10:]),2) if lo else None,'resistance':round(max(hi),2) if hi else None,'volume_ratio20':round(vo[-1]/av,2) if av else None,'state':st,'note':'純技術現況描述，不預測漲跌。'}
+    sr={'support':support,'resistance':resistance,
+      'support_valid':f'回測 {support} 附近止跌，收盤未有效跌破，且未出現明顯放量破位' if support is not None else 'Unavailable',
+      'support_invalid':f'收盤有效跌破 {support}；若同步放量，支撐失效確認度提高' if support is not None else 'Unavailable',
+      'resistance_valid':f'接近 {resistance} 無法收盤站穩，或突破後迅速跌回，壓力仍有效' if resistance is not None else 'Unavailable',
+      'resistance_invalid':f'帶量突破且收盤站穩 {resistance}，後續回測不破，原壓力可視為轉支撐' if resistance is not None else 'Unavailable',
+      'basis':'支撐採近10交易日低點；壓力採近20交易日高點。以收盤確認為主，盤中刺穿不單獨判定失效。'}
+    return {'status':'ok','history_days':len(h),'group':stock_group(c),'ma':ms,'support':support,'resistance':resistance,
+      'support_resistance':sr,'volume_ratio20':round(vo[-1]/av,2) if av else None,'state':st,
+      'note':'技術現況描述，不預測漲跌；支撐／壓力為動態區域，需隨每日K線更新。'}
+
 def peer_snapshot(c,limit=6):
     out=[]
     for p in [x for x in company_rows() if x['code']!=c['code'] and x.get('industry')==c.get('industry')][:30]:
@@ -492,7 +531,7 @@ def stock_summary():
     code=request.args.get('code','').strip(); c=_company_by_code(code)
     if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
     q,e=safe_call(lambda:mis_quote(code,c['market'])); v,e2=safe_call(lambda:valuation_row(code,c['market']))
-    return jsonify({'ok':True,'company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'valuation':v,'source_status':{'公司':'OK','行情':'OK' if q and q.get('price') is not None else 'Unavailable','估值':'OK' if v else 'Unavailable'}})
+    return jsonify({'ok':True,'company':{**{k:v for k,v in c.items() if k!='raw'},'group':stock_group(c)},'quote':q,'valuation':v,'valuation_status':{'pe':'OK' if v and v.get('pe') is not None else 'Unavailable','pb':'OK' if v and v.get('pb') is not None else 'Unavailable','yield':'OK' if v and v.get('yield') is not None else 'Unavailable'},'source_status':{'公司':'OK','行情':'OK' if q and q.get('price') is not None else 'Unavailable','估值':'OK' if v and any(v.get(k) is not None for k in ('pe','pb','yield')) else 'Unavailable'}})
 
 @app.get('/api/stock/technical')
 def stock_technical():
@@ -524,7 +563,7 @@ def stock_research():
     code=request.args.get('code','').strip(); c=_company_by_code(code)
     if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
     q,_=safe_call(lambda:mis_quote(code,c['market']))
-    return jsonify({'ok':True,'version':'9.2.1-safe-market-data','company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'note':'heavy modules load independently'})
+    return jsonify({'ok':True,'version':'9.2.2-valuation-sr-group','company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'note':'heavy modules load independently'})
 
 def _warm_company_cache():
     try: _install_company_rows(_load_company_rows())
