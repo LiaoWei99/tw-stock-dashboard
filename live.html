@@ -1,14 +1,143 @@
-<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>台股 AI 個股研究終端 V9.2.2</title><style>:root{--b:#07111c;--c:#10243a;--l:#29445f;--t:#edf5ff;--m:#9fb2c5;--g:#e9c46a;--r:#ff7373;--u:#62d39b}*{box-sizing:border-box}body{margin:0;background:var(--b);color:var(--t);font-family:-apple-system,BlinkMacSystemFont,"Noto Sans TC",sans-serif}.w{max-width:1180px;margin:auto;padding:20px}.top,.search,.statuses{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.top{justify-content:space-between}.brand{font-size:25px;font-weight:900}.search{margin:18px 0}.search input{flex:1;min-width:240px;background:#071827;color:#fff;border:1px solid var(--l);border-radius:10px;padding:13px}.search button{background:var(--g);border:0;border-radius:10px;padding:13px 20px;font-weight:900}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}.card{grid-column:span 6;background:var(--c);border:1px solid var(--l);border-radius:16px;padding:16px}.full{grid-column:span 12}.pill{display:inline-block;padding:4px 8px;border-radius:20px;background:#17334f;font-size:12px}.big{font-size:28px;font-weight:900}.note{color:var(--m);font-size:13px;line-height:1.6}.gold{color:var(--g)}.up{color:var(--r)}.dn{color:var(--u)}.news{padding:9px 0;border-bottom:1px solid var(--l)}a{color:#d7ebff;text-decoration:none}table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid var(--l);text-align:right}th:first-child,td:first-child{text-align:left}@media(max-width:800px){.card{grid-column:span 12}.w{padding:12px}}</style></head><body><div class="w"><div class="top"><div><div class="brand">台股 AI 個股研究終端 <span class="pill">V9.2.2</span></div><div class="note">一頁看懂｜技術現況｜財報／估值｜新聞消化｜同業比較｜隔日沖／波段</div></div><span id="health" class="pill">API 檢查中</span></div><div class="search"><input id="q" placeholder="輸入股票代號或名稱，例如 2330、台積電"><button onclick="run()">分析</button></div><div id="pick" class="note"></div><div class="grid"><div class="card full"><h3>資料來源狀態</h3><div id="sources" class="statuses">尚未搜尋</div></div><div class="card full"><h2>一頁看懂一支股</h2><div id="summary">輸入股票開始。</div></div><div class="card"><h3>技術面現況判讀</h3><div id="tech">—</div></div><div class="card"><h3>財報／估值白話拆解</h3><div id="fin">—</div></div><div class="card full"><h3>隔日沖＋波段模型</h3><div id="models">—</div></div><div class="card full"><h3>新聞消化成重點</h3><div id="news">—</div></div><div class="card full"><h3>同業放一起比</h3><div id="peers">—</div></div></div></div><script>
-const $=s=>document.querySelector(s),E=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])),V=v=>(v===null||v===undefined||v==='')?'Unavailable':v;
-async function G(u,ms=12000){let c=new AbortController(),tm=setTimeout(()=>c.abort(),ms);try{let r=await fetch(u,{cache:'no-store',signal:c.signal}),ct=r.headers.get('content-type')||'',tx=await r.text();if(!ct.includes('application/json'))throw Error('API '+r.status+' 回傳非 JSON');let j=JSON.parse(tx);if(!r.ok||j.ok===false)throw Error(j.error||'HTTP '+r.status);return j}catch(e){if(e?.name==='AbortError')throw Error('資料來源回應逾時');throw e}finally{clearTimeout(tm)}}
-function P(s){return `<span class="pill ${s==='OK'?'up':'gold'}">${E(s)}</span>`} function S(k,v){let e=$('#st_'+k);if(e)e.innerHTML=P(v)}
-function M(a,k){if(!a)return'資料暫時無法取得';let m=a[k],o=k==='overnight',f=o?a.fundamental.overnight_score:a.fundamental.swing_score,t=o?a.technical.overnight_score:a.technical.swing_score,c=o?a.chips.overnight_score:a.chips.swing_score,p=m.plan;return `<b>${o?'隔日沖':'波段'}</b> ${P(m.status||'資料不足')}｜${m.score}/100｜完整度 ${m.completeness}%<div>基本 ${V(f)}｜技術 ${V(t)}｜籌碼 ${V(c)}</div>${p?`<div class="note">持有 ${E(p.holding)}｜布局 ${p.entry.join('～')}｜目標 ${p.target1}/${p.target2}｜失效 ${p.stop}｜RR ${p.rr1}</div>`:''}`}
-async function run(){let q=$('#q').value.trim();if(!q)return;$('#sources').innerHTML=['公司','行情','估值','技術','評分','新聞','同業'].map(k=>`<span>${k} <i id="st_${k}">${P('載入中')}</i></span>`).join('');['summary','tech','fin','models','news','peers'].forEach(x=>$('#'+x).textContent='載入中…');try{let sr=await G('/api/company/search?q='+encodeURIComponent(q),10000);if(!sr.rows?.length)throw Error('查無公司');if(sr.rows.length>1&&!/^\d+$/.test(q)){ $('#pick').textContent='找到多筆，請改用代號：'+sr.rows.slice(0,8).map(x=>x.code+' '+x.name).join('｜');return}let x=sr.rows[0],code=x.code;S('公司','OK');
-G('/api/stock/summary?code='+code,8000).then(r=>{let c=r.company,m=r.quote,v=r.valuation||{};S('行情',r.source_status.行情);S('估值',r.source_status.估值);$('#summary').innerHTML=`<div class="big">${E(c.code)} ${E(c.name)}　${m&&m.price!==null?V(m.price):'Unavailable'}</div><div>${E(c.market)}｜產業 ${E(c.industry||'Unknown')}｜<b>族群 ${E(c.group||'Unavailable')}</b>${m&&m.pct!==null?`｜漲跌 <span class="${m.pct>=0?'up':'dn'}">${V(m.pct)}%</span>`:''}</div><div>PE ${V(v.pe)}｜PB ${V(v.pb)}｜殖利率 ${V(v.yield)}</div><div class="note">行情來源：${E(m?.source||'Unavailable')}｜資料日期 ${E(m?.date||'Unavailable')} ${E(m?.time||'')}<br>${E(m?.note||'價格僅採官方最後成交價，不使用推估值。')}<br>核心業務：${E(c.business||'Unknown')}</div>`;$('#fin').innerHTML=`PE ${V(v.pe)}｜PB ${V(v.pb)}｜殖利率 ${V(v.yield)}<div class="note">估值來源：${E(v.source||'Unavailable')}｜資料日期 ${E(v.date||'Unavailable')}<br>官方無值時維持 Unavailable，不以 0 或推估值代替。</div>`}).catch(e=>{$('#summary').textContent='基本資料暫時無法取得：'+e.message;S('行情','Unavailable');S('估值','Unavailable')});
-G('/api/stock/technical?code='+code,12000).then(r=>{let t=r.technical;S('技術',r.status);$('#tech').innerHTML=t?.status==='ok'?`<b>${E(t.state)}</b>　<span class="pill">${E(t.group||'Unavailable')}</span><div><b>支撐 ${V(t.support)}</b>｜<b>壓力 ${V(t.resistance)}</b>｜20日量比 ${V(t.volume_ratio20)}</div><div class="note"><b>支撐有效：</b>${E(t.support_resistance?.support_valid||'Unavailable')}<br><b>支撐失效：</b>${E(t.support_resistance?.support_invalid||'Unavailable')}<br><b>壓力有效：</b>${E(t.support_resistance?.resistance_valid||'Unavailable')}<br><b>突破確認：</b>${E(t.support_resistance?.resistance_invalid||'Unavailable')}<br>${E(t.support_resistance?.basis||'')}<br>MA5 ${V(t.ma['5'])}｜MA10 ${V(t.ma['10'])}｜MA20 ${V(t.ma['20'])}｜MA60 ${V(t.ma['60'])}｜MA120 ${V(t.ma['120'])}｜MA240 ${V(t.ma['240'])}</div>`:'歷史資料不足，暫不判定'}).catch(e=>{$('#tech').textContent='技術資料暫時無法取得，不影響其他分析。';S('技術','Unavailable')});
-G('/api/stock/model?code='+code,15000).then(r=>{S('評分',r.status);$('#models').innerHTML=M(r.analysis,'overnight')+'<hr>'+M(r.analysis,'swing')+(r.analysis?`<div class="note">缺少：${E((r.analysis.missing||[]).join('、')||'無')}</div>`:'')}).catch(e=>{$('#models').textContent='評分暫時無法取得，不影響其他分析。';S('評分','Unavailable')});
-G('/api/news/stock?code='+code+'&name='+encodeURIComponent(x.name)+'&industry='+encodeURIComponent(x.industry||'')+'&market='+encodeURIComponent(x.market),12000).then(r=>{S('新聞','OK');$('#news').innerHTML=(r.rows||[]).map(n=>`<div class="news"><span class="pill">${E(n.sentiment||'中性')}</span> <span class="pill">${E(n.category||'新聞')}</span> <a href="${E(n.url)}" target="_blank"><b>${E(n.title)}</b></a><div class="note">${E(n.relation||'')}｜${E(n.source||'')}｜${E(n.published||'')}<br>${E(n.sentiment_reason||'')}</div></div>`).join('')||'目前沒有可驗證事件'}).catch(e=>{$('#news').textContent='新聞來源逾時或暫時無法取得，不影響其他分析。';S('新聞','Unavailable')});
-G('/api/stock/peers?code='+code,12000).then(r=>{S('同業',r.status);$('#peers').innerHTML=r.rows?.length?`<table><tr><th>公司</th><th>PE</th><th>PB</th><th>殖利率</th></tr>${r.rows.map(p=>`<tr><td>${E(p.code)} ${E(p.name)}</td><td>${V(p.pe)}</td><td>${V(p.pb)}</td><td>${V(p.yield)}</td></tr>`).join('')}</table>`:'同業資料不足'}).catch(e=>{$('#peers').textContent='同業資料暫時無法取得，不影響其他分析。';S('同業','Unavailable')});
-}catch(e){$('#sources').innerHTML='<span class="gold">搜尋失敗：'+E(e.message||'資料來源暫時無法取得')+'</span>'}}
-G('/health',6000).then(x=>$('#health').textContent='API '+x.version).catch(()=>$('#health').textContent='API Unavailable');$('#q').addEventListener('keydown',e=>{if(e.key==='Enter')run()});
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>台股 AI 個股研究終端 V9.2.3</title><style>:root{--b:#07111c;--c:#10243a;--l:#29445f;--t:#edf5ff;--m:#9fb2c5;--g:#e9c46a;--r:#ff7373;--u:#62d39b}*{box-sizing:border-box}body{margin:0;background:var(--b);color:var(--t);font-family:-apple-system,BlinkMacSystemFont,"Noto Sans TC",sans-serif}.w{max-width:1180px;margin:auto;padding:20px}.top,.search,.statuses{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.top{justify-content:space-between}.brand{font-size:25px;font-weight:900}.search{margin:18px 0}.search input{flex:1;min-width:240px;background:#071827;color:#fff;border:1px solid var(--l);border-radius:10px;padding:13px}.search button{background:var(--g);border:0;border-radius:10px;padding:13px 20px;font-weight:900}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}.card{grid-column:span 6;background:var(--c);border:1px solid var(--l);border-radius:16px;padding:16px}.full{grid-column:span 12}.pill{display:inline-block;padding:4px 8px;border-radius:20px;background:#17334f;font-size:12px}.big{font-size:28px;font-weight:900}.note{color:var(--m);font-size:13px;line-height:1.6}.gold{color:var(--g)}.up{color:var(--r)}.dn{color:var(--u)}.news{padding:9px 0;border-bottom:1px solid var(--l)}a{color:#d7ebff;text-decoration:none}table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid var(--l);text-align:right}th:first-child,td:first-child{text-align:left}@media(max-width:800px){.card{grid-column:span 12}.w{padding:12px}}</style></head><body><div class="w"><div class="top"><div><div class="brand">台股 AI 個股研究終端 <span class="pill">V9.2.3</span></div><div class="note">一頁看懂｜技術現況｜財報／估值｜新聞消化｜同業比較｜隔日沖／波段</div></div><span id="health" class="pill">API 檢查中</span></div><div class="search"><input id="q" placeholder="輸入股票代號或名稱，例如 2330、台積電"><button onclick="run()">分析</button></div><div id="pick" class="note"></div><div class="grid"><div class="card full"><h3>資料來源狀態</h3><div id="sources" class="statuses">尚未搜尋</div></div><div class="card full"><h2>一頁看懂一支股</h2><div id="summary">輸入股票開始。</div></div><div class="card"><h3>技術面現況判讀</h3><div id="tech">—</div></div><div class="card"><h3>財報／估值白話拆解</h3><div id="fin">—</div></div><div class="card full"><h3>隔日沖＋波段模型</h3><div id="models">—</div></div><div class="card full"><h3>新聞消化成重點</h3><div id="news">—</div></div><div class="card full"><h3>同業放一起比</h3><div id="peers">—</div></div></div></div><script>const $=s=>document.querySelector(s);
+const E=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const V=v=>v===null||v===undefined||v===''?'Unavailable':E(v);
+let generation=0, controllers=new Set();
+class Superseded extends Error {}
+async function G(url,ms=9000,id=generation){
+  const c=new AbortController();controllers.add(c);
+  const timer=setTimeout(()=>c.abort(),ms);
+  try {
+    const r=await fetch(url,{cache:'no-store',signal:c.signal});
+    const j=await r.json();
+    if(id!==generation)throw new Superseded();
+    if(!r.ok||j.ok===false)throw Error(j.error||'HTTP '+r.status);
+    return j;
+  } catch(e){
+    if(id!==generation)throw new Superseded();
+    if(e.name==='AbortError')throw Error('資料來源回應逾時');
+    throw e;
+  } finally {clearTimeout(timer);controllers.delete(c);}
+}
+function P(s){return `<span class="pill ${s==='OK'?'up':'gold'}">${E(s)}</span>`;}
+function S(k,v){const e=$('#st_'+k);if(e)e.innerHTML=P(v);}
+const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function poll(url,id,render,loading=r=>r.status==='Loading',budget=90000){
+  const start=Date.now();
+  while(id===generation){
+    const r=await G(url,9000,id);
+    render(r);
+    if(!loading(r))return r;
+    if(Date.now()-start>=budget)throw Error('模組載入逾時，可重新搜尋重試');
+    await delay(1500);
+  }
+  throw new Superseded();
+}
+function M(a,k){
+  if(!a)return 'Unavailable：研究資料不足';
+  const m=a[k],o=k==='overnight',f=o?a.fundamental.overnight_score:a.fundamental.swing_score,
+    t=o?a.technical.overnight_score:a.technical.swing_score,c=o?a.chips.overnight_score:a.chips.swing_score,p=m.plan;
+  return `<b>${o?'隔日沖':'波段'}</b> ${P(m.status)}｜${V(m.score)}/100｜完整度 ${V(m.completeness)}%
+    <div>基本 ${V(f)}/${o?20:35}｜技術 ${V(t)}/${o?40:35}｜籌碼 ${V(c)}/${o?40:30}</div>
+    <div class="note">${E(m.threshold)}；缺資料不補分。</div>
+    ${p?`<div class="note">情境計畫：持有 ${E(p.holding)}｜布局 ${p.entry.map(V).join('～')}｜目標 ${V(p.target1)}/${V(p.target2)}｜失效 ${V(p.stop)}｜RR ${V(p.rr1)}<br>${E(p.basis)}</div>`:''}`;
+}
+function renderSummary(r){
+  const c=r.company,m=r.quote,v=r.valuation||{};
+  S('摘要','OK');S('行情',r.source_status.行情);S('估值',r.source_status.估值);
+  $('#summary').innerHTML=`<div class="big">${E(c.code)} ${E(c.name)}　${V(m?.price)}</div>
+    <div>${E(c.market)}｜產業 ${E(c.industry||'Unavailable')}｜<b>族群 ${E(c.group||'Unavailable')}</b>
+    ${m?.pct!=null?`｜漲跌 <span class="${m.pct>=0?'up':'dn'}">${V(m.pct)}%</span>`:''}</div>
+    <div>PE ${V(v.pe)}｜PB ${V(v.pb)}｜殖利率 ${V(v.yield)}${v.yield!=null?'%':''}</div>
+    <div class="note">行情來源：${E(m?.source||'Unavailable')}｜資料日期 ${E(m?.date||'Unavailable')} ${E(m?.time||'')}
+    <br>${E(m?.note||'現價僅採 MIS z；昨收不作現價。')}<br>核心業務：${E(c.business||'Unavailable')}</div>`;
+  $('#fin').innerHTML=`PE ${V(v.pe)}｜PB ${V(v.pb)}｜殖利率 ${V(v.yield)}${v.yield!=null?'%':''}
+    <div class="note">估值来源：${E(v.source||'Unavailable')}｜資料日期 ${E(v.date||'Unavailable')}
+    <br>官方缺值維持 Unavailable。${r.source_status.估值==='Loading'?'估值 Loading…':''}</div>`;
+}
+function renderTechnical(r){
+  S('技術',r.status);if(r.status==='Loading')return;
+  const t=r.technical;
+  if(!t?.ma){$('#tech').textContent='Unavailable：歷史資料不足';return;}
+  $('#tech').innerHTML=`<b>${E(t.state)}</b> ${P(r.status)}｜${E(t.group)}
+    <div><b>支撐 ${V(t.support)}</b>｜<b>壓力 ${V(t.resistance)}</b>｜20日量比 ${V(t.volume_ratio20)}</div>
+    <div class="note"><b>支撐有效：</b>${E(t.support_resistance?.support_valid)}<br>
+    <b>支撐失效：</b>${E(t.support_resistance?.support_invalid)}<br>
+    <b>壓力有效：</b>${E(t.support_resistance?.resistance_valid)}<br>
+    <b>突破確認：</b>${E(t.support_resistance?.resistance_invalid)}<br>
+    ${E(t.support_resistance?.basis)}<br>
+    ${[5,10,20,60,120,240].map(k=>`MA${k} ${V(t.ma[k])}`).join('｜')}<br>
+    ${E(t.price_basis)}｜截至 ${E(t.as_of)}｜${V(t.history_days)} 交易日<br>${E(t.note)}
+    ${r.errors?.length?'<br>部分月份來源失敗；僅使用最近連續月份。':''}</div>`;
+}
+function safeURL(url){try{const u=new URL(url);return /^https?:$/.test(u.protocol)?E(u.href):'#';}catch{return '#';}}
+async function moduleLoad(id,key,target,url,render){
+  try{await poll(url,id,render);}
+  catch(e){if(e instanceof Superseded)return;S(key,'Unavailable');$('#'+target).textContent='Unavailable：'+e.message+'。其他模組可繼續使用。';}
+}
+function startModules(x,id){
+  const code=encodeURIComponent(x.code);
+  void moduleLoad(id,'技術','tech','/api/stock/technical?code='+code,renderTechnical);
+  void moduleLoad(id,'評分','models','/api/stock/model?code='+code,r=>{
+    S('評分',r.status);if(r.status==='Loading')return;
+    $('#models').innerHTML=M(r.analysis,'overnight')+'<hr>'+M(r.analysis,'swing')+
+      `<div class="note">缺少：${E(r.analysis?.missing?.join('、')||'無')}<br>${E(r.analysis?.method||'')}</div>`;
+  });
+  const params=new URLSearchParams({code:x.code,name:x.name,industry:x.industry||'',market:x.market||''});
+  void moduleLoad(id,'新聞','news','/api/news/stock?'+params,r=>{
+    S('新聞',r.status);if(r.status==='Loading')return;
+    $('#news').innerHTML=(r.rows||[]).map(n=>`<div class="news">${P(n.sentiment||'待確認')} ${P(n.category||'新聞')}
+      <a href="${safeURL(n.url)}" target="_blank" rel="noopener noreferrer"><b>${E(n.title)}</b></a>
+      <div class="note">${E(n.relation)}｜${E(n.source)}｜${E(n.published)}<br>${E(n.sentiment_reason)}</div></div>`).join('')||'Unavailable：目前沒有可取得事件';
+    if(r.errors?.length)$('#news').innerHTML+='<div class="note">部分新聞來源無法取得，顯示已取得的來源。</div>';
+  });
+  void moduleLoad(id,'同業','peers','/api/stock/peers?code='+code,r=>{
+    S('同業',r.status);if(r.status==='Loading')return;
+    $('#peers').innerHTML=r.rows?.length?`<table><tr><th>公司</th><th>PE</th><th>PB</th><th>殖利率</th></tr>
+      ${r.rows.map(p=>`<tr><td>${E(p.code)} ${E(p.name)}<div class="note">${E(p.market)}｜${E(p.date||'日期 Unavailable')}</div></td>
+      <td>${V(p.pe)}</td><td>${V(p.pb)}</td><td>${V(p.yield)}${p.yield!=null?'%':''}</td></tr>`).join('')}</table><div class="note">${E(r.basis)}</div>`:'Unavailable：同業資料不足';
+  });
+}
+async function run(){
+  const keyword=$('#q').value.trim();if(!keyword)return;
+  const id=++generation;for(const c of controllers)c.abort();controllers.clear();
+  $('#pick').textContent='';
+  $('#sources').innerHTML=['公司','摘要','行情','估值','技術','評分','新聞','同業'].map(k=>`<span>${k} <i id="st_${k}">${P('Loading')}</i></span>`).join('');
+  ['summary','tech','fin','models','news','peers'].forEach(k=>$('#'+k).textContent='Loading…');
+  let sr;
+  try {
+    sr=await poll('/api/company/search?q='+encodeURIComponent(keyword),id,()=>{},r=>r.status==='Loading',20000);
+    if(!sr.rows?.length)throw Error('查無公司，或公司資料尚未就緒');
+    if(sr.rows.length>1&&!/^\d+$/.test(keyword)){
+      $('#pick').textContent='找到多筆，請選擇：';
+      for(const x of sr.rows.slice(0,8)){
+        const b=document.createElement('button');b.textContent=x.code+' '+x.name;b.onclick=()=>{$('#q').value=x.code;void run();};$('#pick').appendChild(b);
+      }
+      for(const k of ['公司','摘要','行情','估值','技術','評分','新聞','同業'])S(k,k==='公司'?'OK':'Unavailable');
+      ['summary','tech','fin','models','news','peers'].forEach(k=>$('#'+k).textContent='請先選擇股票');return;
+    }
+  }catch(e){
+    if(e instanceof Superseded)return;
+    for(const k of ['公司','摘要','行情','估值','技術','評分','新聞','同業'])S(k,'Unavailable');
+    $('#summary').textContent='股票搜尋暫時無法完成：'+e.message;
+    ['tech','fin','models','news','peers'].forEach(k=>$('#'+k).textContent='Unavailable');return;
+  }
+  const x=sr.rows[0];S('公司','OK');
+  $('#summary').innerHTML=`<div class="big">${E(x.code)} ${E(x.name)}</div><div>${E(x.market)}｜摘要 Loading…</div>`;
+  // Core summary gets the first request. Optional modules start after its first result.
+  let summary;
+  try {summary=await G('/api/stock/summary?code='+encodeURIComponent(x.code),9000,id);renderSummary(summary);}
+  catch(e){
+    if(e instanceof Superseded)return;
+    S('摘要','Unavailable');S('行情','Unavailable');S('估值','Unavailable');
+    $('#summary').innerHTML=`<div class="big">${E(x.code)} ${E(x.name)}</div><div>摘要 Unavailable：${E(e.message)}</div>`;
+    $('#fin').textContent='Unavailable';
+  }
+  startModules(x,id);
+  if(summary?.source_status?.估值==='Loading'){
+    void poll('/api/stock/summary?code='+encodeURIComponent(x.code),id,renderSummary,r=>r.source_status.估值==='Loading',30000)
+      .catch(e=>{if(e instanceof Superseded)return;S('估值','Unavailable');$('#fin').textContent='估值 Unavailable：'+e.message;});
+  }
+}
+G('/health',6000).then(x=>$('#health').textContent='API '+x.version).catch(e=>{if(!(e instanceof Superseded))$('#health').textContent='API Unavailable';});
+$('#q').addEventListener('keydown',e=>{if(e.key==='Enter')void run();});
 </script></body></html>

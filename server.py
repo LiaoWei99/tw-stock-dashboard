@@ -2,7 +2,10 @@ from flask import Flask, jsonify, send_from_directory, request
 from urllib.request import Request, urlopen
 from urllib.parse import quote, urlencode
 import json, os, time, xml.etree.ElementTree as ET, re
-import threading
+import threading, math, datetime
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from copy import deepcopy
+from collections import OrderedDict
 app=Flask(__name__, static_folder='.')
 BASE=os.path.dirname(__file__)
 
@@ -10,11 +13,83 @@ def fetch(url, accept='application/json'):
     req=Request(url,headers={'User-Agent':'Mozilla/5.0 TW-Stock-Dashboard/3.0','Accept':accept})
     with urlopen(req,timeout=5) as r: return r.read()
 def get_json(url): return json.loads(fetch(url).decode('utf-8'))
-def n(v):
+def num_or_none(v):
     try:
-        x=str(v or '').replace(',','').replace('+','').strip()
-        return float(x) if x not in ('','--','---') else 0.0
-    except:return 0.0
+        if v is None or isinstance(v, bool): return None
+        x = float(str(v).replace(',', '').replace('%', '').strip())
+        return x if math.isfinite(x) else None
+    except (ValueError, TypeError): return None
+
+def num_or_zero(v):
+    value = num_or_none(v)
+    return 0.0 if value is None else value
+
+_CACHE_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix='cache')
+_CORE_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='core')
+_HISTORY_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='history')
+_NEWS_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='news')
+
+class TTLCache:
+    """Bounded process-local cache with a single in-flight loader per key.
+
+    Failed loads use a short backoff; expired values are never labelled fresh.
+    All returned values are copies, preventing callers from mutating shared data.
+    """
+    def __init__(self, ttl, maxsize=512, executor=None):
+        self.ttl, self.maxsize = ttl, maxsize
+        self.executor = executor or _CACHE_POOL
+        self.lock = threading.RLock()
+        self.entries, self.pending = OrderedDict(), {}
+
+    def _load(self, key, loader):
+        try:
+            value = loader()
+            error = None
+        except Exception as exc:
+            value, error = None, str(exc)[:240]
+            app.logger.warning('source unavailable key=%s error=%s', key, error)
+        with self.lock:
+            ttl = self.ttl if error is None and value is not None else min(self.ttl, 15)
+            if isinstance(value, dict) and value.get('errors'): ttl = min(ttl, 60)
+            self.entries[key] = (time.monotonic() + ttl, value, error)
+            self.entries.move_to_end(key)
+            while len(self.entries) > self.maxsize: self.entries.popitem(last=False)
+            self.pending.pop(key, None)
+        return value
+
+    def get(self, key, loader, wait=True, timeout=6):
+        with self.lock:
+            entry = self.entries.get(key)
+            if entry and entry[0] > time.monotonic(): return deepcopy(entry[1])
+            future = self.pending.get(key)
+            if future is None:
+                if len(self.pending) >= 64: return None
+                future = self.executor.submit(self._load, key, loader)
+                self.pending[key] = future
+        if not wait: return None
+        try: return deepcopy(future.result(timeout=timeout))
+        except TimeoutError: return None
+
+    def status(self, key):
+        with self.lock:
+            if key in self.pending: return 'Loading'
+            e = self.entries.get(key)
+            return 'OK' if e and e[0] > time.monotonic() and e[1] is not None and not e[2] else 'Unavailable'
+
+    def error(self, key):
+        with self.lock:
+            e = self.entries.get(key)
+            return e[2] if e else None
+
+_QUOTE_CACHE = TTLCache(5, executor=_CORE_POOL)
+_VALUATION_CACHE = TTLCache(900, 4, executor=_CORE_POOL)
+_INSTITUTIONAL_CACHE = TTLCache(900, 4, executor=_CORE_POOL)
+_NEWS_CACHE = TTLCache(600)
+_HISTORY_CACHE = TTLCache(3600, 128)
+
+def market_key(market):
+    if market not in ('上市', '上櫃'): raise ValueError('unknown market')
+    return market
 
 _COMPANY_CACHE={'rows':[],'ts':0}
 _COMPANY_INDEX={}
@@ -30,46 +105,49 @@ def _load_company_rows():
             data=get_json(url)
             for r in data:
                 code=str(r.get('公司代號') or r.get('SecuritiesCompanyCode') or '').strip()
-                name=str(r.get('公司簡稱') or r.get('公司名稱') or r.get('CompanyName') or '').strip()
+                name=str(r.get('公司簡稱') or r.get('公司名稱') or r.get('CompanyAbbreviation') or r.get('CompanyName') or '').strip()
                 if not code or not name: continue
-                rows.append({'code':code,'name':name,'market':market,'industry':str(r.get('產業別') or r.get('產業類別') or r.get('Industry') or '').strip(),'business':str(r.get('主要經營業務') or r.get('營業項目') or r.get('BusinessScope') or '').strip(),'raw':r})
+                rows.append({'code':code,'name':name,'market':market,'industry':str(r.get('產業別') or r.get('產業類別') or r.get('SecuritiesIndustryCode') or r.get('Industry') or '').strip(),'business':str(r.get('主要經營業務') or r.get('營業項目') or r.get('BusinessScope') or '').strip(),'raw':r})
         except Exception: continue
     return rows
 
 def _install_company_rows(rows):
     if not rows:return False
     with _COMPANY_LOCK:
+        merged={x['code']:x for x in _COMPANY_CACHE['rows']}
+        merged.update({x['code']:x for x in rows})
+        rows=list(merged.values())
         _COMPANY_CACHE['rows']=rows; _COMPANY_CACHE['ts']=time.time()
         _COMPANY_INDEX.clear(); _COMPANY_INDEX.update({x['code']:x for x in rows if x.get('code')})
     return True
 
 def company_rows():
     # Memory only: no network I/O on the request path.
-    return list(_COMPANY_CACHE.get('rows') or [])
+    with _COMPANY_LOCK: return deepcopy(_COMPANY_CACHE.get('rows') or [])
 
-def cached_company(code): return _COMPANY_INDEX.get(str(code))
+def cached_company(code):
+    with _COMPANY_LOCK: return deepcopy(_COMPANY_INDEX.get(str(code)))
 
 def _parse_mis_row(r,market):
-    def num(v):
-        try:
-            x=str(v if v is not None else '').replace(',','').replace('+','').strip()
-            if x in ('','--','---','-'):return None
-            return float(x)
-        except:return None
+    num = num_or_none
     code=str(r.get('c') or '').strip(); last=num(r.get('z')); prev=num(r.get('y'))
     change=(last-prev) if last is not None and prev is not None else None
     return {'code':code,'name':r.get('n') or r.get('nf') or '','market':market,'price':last,'prev_close':prev,'change':round(change,2) if change is not None else None,'pct':round(change/prev*100,2) if change is not None and prev else None,'open':num(r.get('o')),'high':num(r.get('h')),'low':num(r.get('l')),'volume':num(r.get('v')),'time':r.get('t') or '','date':r.get('d') or '','source':'TWSE MIS','price_status':'last_trade' if last is not None else 'Unavailable','note':None if last is not None else 'MIS 未提供最後成交價；不以昨收或推估值代替。'}
 
-def discover_quote(code):
+def _discover_quote(code):
     chans=f'tse_{code}.tw|otc_{code}.tw'
     url='https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch='+quote(chans,safe='|_.')+'&json=1&delay=0'
     data=get_json(url)
     for r in data.get('msgArray') or []:
         if str(r.get('c') or '').strip()!=str(code):continue
-        ex=str(r.get('ex') or r.get('ch') or '').lower(); market='上櫃' if ('otc' in ex or str(r.get('ch') or '').lower().startswith('otc_')) else '上市'
+        ex=str(r.get('ex') or r.get('ch') or '').lower(); market='上櫃' if 'otc' in ex else ('上市' if 'tse' in ex else None)
+        if market is None: continue
         q=_parse_mis_row(r,market)
         if q.get('name') or q.get('prev_close') is not None or q.get('price') is not None:return q
     return None
+
+def discover_quote(code):
+    return _QUOTE_CACHE.get(str(code), lambda: _discover_quote(code))
 
 def company_by_code_fast(code):
     c=cached_company(code)
@@ -78,15 +156,20 @@ def company_by_code_fast(code):
         try:q=discover_quote(code)
         except Exception:q=None
         if q and q.get('name'):
-            return {'code':code,'name':q.get('name') or code,'market':q.get('market') or '','industry':'','business':'','raw':{}}
+            c={'code':code,'name':q['name'],'market':q['market'],'industry':'','business':'','raw':{}}
+            with _COMPANY_LOCK: _COMPANY_INDEX[code]=c
+            return c
     return None
 
-def mis_quote(code,market=None):
-    if not market:return discover_quote(code)
-    ex='tse' if market=='上市' else 'otc'
+def _mis_quote(code,market=None):
+    if not market:return _discover_quote(code)
+    ex='tse' if market_key(market)=='上市' else 'otc'
     url='https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch='+quote(f'{ex}_{code}.tw',safe='|_.')+'&json=1&delay=0'
     data=get_json(url); rows=data.get('msgArray') or []
-    return _parse_mis_row(rows[0],market) if rows else None
+    return next((_parse_mis_row(r,market) for r in rows if str(r.get('c')) == str(code)), None)
+
+def mis_quote(code, market=None):
+    return _QUOTE_CACHE.get(str(code), lambda: _mis_quote(code,market))
 
 def sentiment(title):
     t=(title or '').lower()
@@ -105,7 +188,7 @@ def manifest(): return send_from_directory(BASE,'manifest.webmanifest',mimetype=
 @app.get('/sw.js')
 def sw(): return send_from_directory(BASE,'sw.js',mimetype='application/javascript')
 @app.get('/health')
-def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'9.2.2-valuation-sr-group'})
+def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'9.2.3'})
 
 @app.get('/api/twse/realtime')
 def realtime():
@@ -122,9 +205,9 @@ def market_top():
         for r in rows:
             code=str(r.get('Code',''))
             if not code.isdigit():continue
-            value=n(r.get('TradeValue'));vol=n(r.get('TradeVolume'));close=n(r.get('ClosingPrice'));change=n(r.get('Change'));prev=close-change if close else 0
-            out.append({'code':code,'name':r.get('Name',''),'close':close,'change':change,'pct':round(change/prev*100,2) if prev else 0,'value':value,'volume':vol,'open':n(r.get('OpeningPrice')),'high':n(r.get('HighestPrice')),'low':n(r.get('LowestPrice')),'vwap':round(value/vol,2) if vol else None})
-        out.sort(key=lambda x:x['value'],reverse=True)
+            value=num_or_none(r.get('TradeValue'));vol=num_or_none(r.get('TradeVolume'));close=num_or_none(r.get('ClosingPrice'));change=num_or_none(r.get('Change'));prev=close-change if close is not None and change is not None else None
+            out.append({'code':code,'name':r.get('Name',''),'close':close,'change':change,'pct':round(change/prev*100,2) if prev and change is not None else None,'value':value,'volume':vol,'open':num_or_none(r.get('OpeningPrice')),'high':num_or_none(r.get('HighestPrice')),'low':num_or_none(r.get('LowestPrice')),'vwap':round(value/vol,2) if vol else None})
+        out.sort(key=lambda x:num_or_zero(x['value']),reverse=True)
         return jsonify({'ok':True,'source':'TWSE OpenAPI STOCK_DAY_ALL','timing':'official dataset; not tick-real-time','rows':out[:limit],'ts':int(time.time()*1000)})
     except Exception as e:return jsonify({'ok':False,'error':str(e)}),502
 
@@ -138,7 +221,7 @@ def company_search():
     rows=company_rows()
     ql=q.lower()
     out=[{k:v for k,v in x.items() if k!='raw'} for x in rows if ql in x['name'].lower() or ql in x['code'].lower()]
-    return jsonify({'ok':True,'rows':out[:20],'cached':bool(_COMPANY_CACHE.get('rows'))})
+    return jsonify({'ok':True,'rows':out[:20],'cached':bool(rows),'status':'OK' if rows else 'Loading'})
 
 @app.get('/api/stock/context')
 def stock_context():
@@ -194,35 +277,32 @@ def official_material_info(code, market, limit=12):
                             'relation':'公司直接','sentiment':se,'sentiment_reason':reason})
             if len(out)>=limit: break
     except Exception:
-        pass
+        raise
     return out
 
 def layered_stock_news(code, name, industry, market):
-    queries=[]
-    if name: queries += [(f'"{name}" when:7d','公司直接新聞'),(f'{name} {code} when:14d','公司直接新聞')]
-    if name and industry: queries += [(f'"{name}" {industry} when:14d','產業／供應鏈')]
-    if industry: queries += [(f'{industry} 台股 when:7d','產業／供應鏈')]
-    rows=[]; seen=set()
-    for q,cat in queries:
+    jobs=[]
+    if name:
+        jobs.append(('公司直接新聞', lambda: news_rss(f'"{name}" {code} when:14d', 15)))
+    if industry and not industry.isdigit():
+        jobs.append(('產業／供應鏈', lambda: news_rss(f'{industry} 台股 when:7d', 10)))
+    if code and market in ('上市','上櫃'):
+        jobs.append(('官方重大訊息', lambda: official_material_info(code,market,12)))
+    futures=[(cat,_NEWS_POOL.submit(fn)) for cat,fn in jobs]
+    rows=[]; errors=[]; seen=set()
+    for cat,f in futures:
         try:
-            for x in news_rss(q,10):
-                key=re.sub(r'\\s+',' ',x.get('title','')).strip().lower()
+            items=f.result(timeout=8)
+            for item in items:
+                x=dict(item); title=x.get('title',''); key=re.sub(r'\s+',' ',title).strip()
                 if not key or key in seen: continue
-                seen.add(key)
-                x['category']=cat
-                x['relation']='公司直接' if (name and name in x.get('title','')) else ('產業相關' if cat=='產業／供應鏈' else '可能相關')
-                x['sentiment'],x['sentiment_reason']=sentiment(x.get('title',''))
+                seen.add(key); x['category']=cat
+                x['relation']='公司直接' if name and name in title else ('產業相關' if cat=='產業／供應鏈' else '可能相關')
+                x['sentiment'],x['sentiment_reason']=sentiment(title)
                 rows.append(x)
-        except Exception:
-            pass
-    official=official_material_info(code,market,12)
-    # Official disclosures first, then media. Avoid duplicate titles.
-    merged=[]; seen2=set()
-    for x in official+rows:
-        key=re.sub(r'\\s+',' ',x.get('title','')).strip().lower()
-        if key and key not in seen2:
-            seen2.add(key); merged.append(x)
-    return merged[:30]
+        except Exception as exc: errors.append({'source':cat,'error':str(exc)[:180]})
+    rows.sort(key=lambda x: x['category']!='官方重大訊息')
+    return {'rows':rows[:30], 'errors':errors}
 
 @app.get('/api/news/stock')
 def news_stock():
@@ -230,15 +310,19 @@ def news_stock():
     industry=request.args.get('industry','').strip(); market=request.args.get('market','').strip()
     if not code and not name:return jsonify({'ok':False,'error':'code/name required'}),400
     try:
-        if code and (not name or not market):
-            m=[x for x in company_rows() if x['code']==code]
-            if m:
-                name=name or m[0]['name']; industry=industry or m[0]['industry']; market=market or m[0]['market']
-        rows=layered_stock_news(code,name,industry,market)
-        return jsonify({'ok':True,'source':'官方重大訊息 + Google News 分層聚合','rows':rows,
-          'coverage':['公司直接新聞','官方重大訊息','產業／供應鏈'],
-          'note':'若公司直接新聞不足，會續查官方重大訊息與產業事件；不以不相關新聞填補。',
-          'sentiment_note':'偏多/偏空為事件方向規則分類，不代表股價預測。'})
+        c=cached_company(code) if code else None
+        if c:
+            name=c['name']; market=c['market']
+            industry=stock_group(c)
+        elif industry.isdigit():
+            industry=''
+        if industry=='Unavailable': industry=''
+        key=(code,name,industry,market)
+        result=_NEWS_CACHE.get(key,lambda:layered_stock_news(code,name,industry,market),wait=False)
+        return jsonify({'ok':True,'source':'官方重大訊息 + Google News 分層聚合',
+            'rows':(result or {}).get('rows',[]), 'errors':(result or {}).get('errors',[]),
+            'status':('OK' if result.get('rows') else 'Unavailable') if result is not None else _NEWS_CACHE.status(key),
+            'sentiment_note':'標題規則分類，需閱讀原文確認，不代表股價預測。'})
     except Exception as e:return jsonify({'ok':False,'error':str(e)}),502
 
 @app.get('/api/futures/ranking')
@@ -277,189 +361,183 @@ def _pick(r, includes):
         if all(s in k for s in includes): return v
     return None
 
-_VALUATION_CACHE={}
-_VALUATION_TTL=900
-
-def _valuation_rows(market):
-    key='twse' if market=='上市' else 'tpex'
-    now=time.time(); hit=_VALUATION_CACHE.get(key)
-    if hit and now-hit['ts']<_VALUATION_TTL:return hit['rows']
+def _valuation_rows(market, wait=True):
+    market_key(market)
     url=('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL' if market=='上市'
          else 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis')
-    rows=get_json(url); _VALUATION_CACHE[key]={'ts':now,'rows':rows}; return rows
+    return _VALUATION_CACHE.get(market, lambda:get_json(url), wait=wait) or []
 
-def _num_or_none(v):
-    try:
-        x=str(v if v is not None else '').replace(',','').replace('%','').strip()
-        if x in ('','--','---','-','N/A','null','None'):return None
-        return float(x)
-    except:return None
+_num_or_none = num_or_none
 
-def valuation_row(code, market='上市'):
+def first_field(row, *names):
+    for name in names:
+        if name in row and row[name] is not None and str(row[name]).strip() != '': return row[name]
+    return None
+
+def valuation_row(code, market='上市', wait=True):
     try:
-        for r in _valuation_rows(market):
+        for r in _valuation_rows(market,wait):
             rc=str(r.get('Code') or r.get('SecuritiesCompanyCode') or r.get('SecuritiesCode') or _field(r,['證券代號','股票代號','公司代號'])).strip()
             if rc!=code:continue
             if market=='上市':
-                pe=_num_or_none(r.get('PEratio') or r.get('PERatio') or r.get('本益比'))
-                pb=_num_or_none(r.get('PBratio') or r.get('PBRatio') or r.get('股價淨值比'))
-                dy=_num_or_none(r.get('DividendYield') or r.get('DividendYield(%)') or r.get('殖利率(%)') or r.get('殖利率'))
+                pe=num_or_none(first_field(r, 'PEratio', 'PERatio', '本益比'))
+                pb=num_or_none(first_field(r, 'PBratio', 'PBRatio', '股價淨值比'))
+                dy=num_or_none(first_field(r, 'YieldRatio', 'DividendYield', 'DividendYield(%)', '殖利率(%)', '殖利率'))
             else:
-                pe=_num_or_none(r.get('PriceEarningRatio') or r.get('PEratio') or r.get('本益比'))
-                pb=_num_or_none(r.get('PriceBookRatio') or r.get('PBratio') or r.get('股價淨值比'))
-                dy=_num_or_none(r.get('DividendYield') or r.get('DividendYield(%)') or r.get('殖利率(%)') or r.get('殖利率'))
+                pe=num_or_none(first_field(r, 'PriceEarningRatio', 'PEratio', '本益比'))
+                pb=num_or_none(first_field(r, 'PriceBookRatio', 'PBratio', '股價淨值比'))
+                dy=num_or_none(first_field(r, 'YieldRatio', 'DividendYield', 'DividendYield(%)', '殖利率(%)', '殖利率'))
             return {'pe':pe,'pb':pb,'yield':dy,'date':str(r.get('Date') or r.get('日期') or ''),
                     'source':'TWSE BWIBBU_ALL' if market=='上市' else 'TPEx tpex_mainboard_peratio_analysis'}
     except Exception:pass
     return None
 
+def _institutional_rows(market):
+    market_key(market)
+    if market=='上櫃':
+        return get_json('https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading')
+    # TWSE's website publishes T86; /openapi/v1/fund/T86_ALL is not a JSON dataset.
+    j=get_json('https://www.twse.com.tw/rwd/zh/fund/T86?response=json&selectType=ALLBUT0999')
+    if j.get('stat') != 'OK': raise ValueError('TWSE T86 unavailable: '+str(j.get('stat')))
+    return [dict(zip(j.get('fields',[]), r), Date=j.get('date','')) for r in j.get('data',[])]
+
 def institutional_row(code, market='上市'):
-    try:
-        rows=(get_json('https://openapi.twse.com.tw/v1/fund/T86_ALL') if market=='上市'
-              else get_json('https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading'))
-        for r in rows:
-            rc=str(r.get('Code') or r.get('SecuritiesCompanyCode') or _field(r,['證券代號','股票代號','公司代號'])).strip()
-            if rc!=code: continue
-            def val(*names):
-                for k,v in r.items():
-                    if any(name.lower() in str(k).lower() for name in names): return n(v)
-                return 0
-            foreign=val('Foreign','外資','外陸資'); trust=val('Investment_Trust','Investment Trust','投信')
-            dealer=val('Dealer','自營商'); total=val('Total','三大法人') or foreign+trust+dealer
-            return {'foreign':foreign,'trust':trust,'dealer':dealer,'total':total,
-                    'source':'TWSE/TPEX 三大法人官方資料','timing':'官方盤後法人資料；依交易所公告時程更新'}
-    except Exception: pass
+    rows=_INSTITUTIONAL_CACHE.get(market,lambda:_institutional_rows(market)) or []
+    for r in rows:
+        rc=str(first_field(r,'Code','SecuritiesCompanyCode','證券代號') or '').strip()
+        if rc!=code: continue
+        # Exact net/difference columns only. Never mistake buy volume for net buying.
+        foreign=num_or_none(first_field(r,'外陸資買賣超股數(不含外資自營商)',
+            'Foreign Investors include Mainland Area Investors (Foreign Dealers excluded)-Difference'))
+        trust=num_or_none(first_field(r,'投信買賣超股數','SecuritiesInvestmentTrustCompanies-Difference'))
+        dealer=num_or_none(first_field(r,'自營商買賣超股數','Dealers-Difference'))
+        total=num_or_none(first_field(r,'三大法人買賣超股數','TotalDifference'))
+        return {'foreign':foreign,'trust':trust,'dealer':dealer,'total':total,
+                'date':str(r.get('Date') or ''),'source':'TWSE T86' if market=='上市' else 'TPEx tpex_3insti_daily_trading',
+                'timing':'官方盤後法人資料；單位：股'}
     return None
 
-def market_history(code, market='上市', months=4):
-    # Official daily history. Each source fails independently and returns [].
-    import datetime
-    if market=='上櫃':
-        out=[]
-        try:
-            rows=get_json('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes')
-            for r in rows:
-                rc=str(r.get('SecuritiesCompanyCode') or _field(r,['證券代號','股票代號','公司代號'])).strip()
-                if rc!=code: continue
-                close=n(r.get('Close') or _field(r,['收盤價']))
-                op=n(r.get('Open') or _field(r,['開盤價']))
-                hi=n(r.get('High') or _field(r,['最高價']))
-                lo=n(r.get('Low') or _field(r,['最低價']))
-                vol=n(r.get('TradingShares') or _field(r,['成交股數']))
-                ds=str(r.get('Date') or _field(r,['日期'])).strip()
-                if close: out.append({'date':ds,'open':op,'high':hi,'low':lo,'close':close,'volume':vol})
-        except Exception: pass
-        return out
-    out=[]; today=datetime.date.today(); seen=set()
-    for i in range(months):
-        y=today.year; m=today.month-i
-        while m<=0: y-=1; m+=12
-        url='https://www.twse.com.tw/exchangeReport/STOCK_DAY?'+urlencode({'response':'json','date':f'{y:04d}{m:02d}01','stockNo':code})
-        try:
-            j=get_json(url)
-            for row in j.get('data',[]):
-                if len(row)<9: continue
-                ds=str(row[0]); close=n(row[6]); vol=n(row[1]); op=n(row[3]); hi=n(row[4]); lo=n(row[5])
-                if ds not in seen and close:
-                    seen.add(ds); out.append({'date':ds,'open':op,'high':hi,'low':lo,'close':close,'volume':vol})
-        except Exception: pass
-    return list(reversed(out))
+def _taipei_now():
+    return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
 
-def _norm(points, available, target):
-    return round(points/available*target) if available>0 else None
+def _history_month(code, market, year, month):
+    if market=='上市':
+        url='https://www.twse.com.tw/exchangeReport/STOCK_DAY?'+urlencode({'response':'json','date':f'{year:04d}{month:02d}01','stockNo':code})
+    else:
+        url='https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock?'+urlencode({'response':'json','date':f'{year:04d}/{month:02d}/01','code':code})
+    j=get_json(url)
+    if str(j.get('stat','')).lower()!='ok': raise ValueError(str(j.get('stat') or 'invalid history response'))
+    if market=='上市': data=j.get('data',[])
+    else:
+        tables=j.get('tables') or []
+        data=tables[0].get('data',[]) if tables else []
+        fields=tables[0].get('fields',[]) if tables else []
+        if not fields or '成交張數' not in str(fields[1]): raise ValueError('unknown TPEx volume unit')
+    out=[]; now=_taipei_now()
+    for row in data:
+        if len(row)<7: continue
+        try:
+            y,m,d=map(int,str(row[0]).split('/')); y=y+1911 if y<1911 else y
+            day=datetime.date(y,m,d)
+        except (ValueError,TypeError): continue
+        # Do not treat an intraday row as a confirmed closing price.
+        if day>now.date() or (day==now.date() and now.hour<15): continue
+        op,hi,lo,cl=[num_or_none(row[i]) for i in (3,4,5,6)]
+        if cl is None or cl<=0: continue
+        vol=num_or_none(row[1])
+        if market=='上櫃' and vol is not None: vol*=1000
+        out.append({'date':day.isoformat(),'open':op,'high':hi,'low':lo,'close':cl,'volume':vol})
+    return out
+
+def _load_history(code,market):
+    market_key(market); today=_taipei_now().date(); jobs=[]
+    for i in range(12):
+        y,m=divmod(today.year*12+today.month-1-i,12); m+=1
+        jobs.append((f'{y:04d}-{m:02d}',_HISTORY_POOL.submit(_history_month,code,market,y,m)))
+    all_rows=[]; errors=[]; contiguous=True
+    for month,future in jobs:
+        try:
+            rows=future.result()
+            if contiguous: all_rows.extend(rows)
+        except Exception as exc:
+            errors.append({'month':month,'error':str(exc)[:180]}); contiguous=False
+    rows=sorted({r['date']:r for r in all_rows}.values(),key=lambda x:x['date'])
+    return {'rows':rows,'errors':errors,'requested_months':12,'source':'TWSE STOCK_DAY' if market=='上市' else 'TPEx tradingStock'}
+
+def history_result(code,market,wait=False):
+    return _HISTORY_CACHE.get((market,code,12),lambda:_load_history(code,market),wait=wait,timeout=40)
+
+def market_history(code,market='上市',months=12):
+    # months retained for compatibility; both research modules ALWAYS share 12 months.
+    return (history_result(code,market,wait=True) or {}).get('rows',[])
 
 def analyst_model(company, quote):
-    code=company['code']; market=company['market']; val=valuation_row(code,market)
-    inst=institutional_row(code,market)
-    hist=market_history(code,market,4)
-    # Fundamental: 20 overnight / 35 swing. Only verified fields count.
-    fp=0; fa=0; freasons=[]
+    code,market=company['code'],company['market']
+    val=valuation_row(code,market); inst=institutional_row(code,market)
+    hist=market_history(code,market,12)
+    fp=fa=tp=ta=cp=ca=0; freasons=[]; treasons=[]; creasons=[]
     if company.get('industry'): fp+=4; fa+=4; freasons.append('官方產業分類可辨識')
     if company.get('business'): fp+=4; fa+=4; freasons.append('主要業務資料可辨識')
-    if val:
-        fa+=12
-        pe=val.get('pe'); pb=val.get('pb'); dy=val.get('yield')
-        if pe and 0<pe<=25: fp+=5; freasons.append('本益比處於較低區間')
-        elif pe and pe<=50: fp+=3; freasons.append('本益比中性')
-        elif pe: fp+=1; freasons.append('本益比較高，估值風險需留意')
-        if pb and pb<=3: fp+=3
-        elif pb and pb<=6: fp+=2
-        elif pb: fp+=1
-        if dy is not None: fp+=1
-    # Technical: current quote + history when available.
-    tp=0; ta=0; treasons=[]
-    if quote and quote.get('price'):
-        ta+=18; pct=quote.get('pct') or 0; op=quote.get('open'); hi=quote.get('high'); lo=quote.get('low'); px=quote['price']
-        if pct>0: tp+=5
-        if pct>=2: tp+=2
-        if op and px>=op: tp+=4; treasons.append('價格守在開盤價之上')
-        if hi and lo and hi>lo:
-            p=(px-lo)/(hi-lo)
-            if p>=.8: tp+=5; treasons.append('價格位於日內區間上緣')
-            elif p>=.55: tp+=3
-            else: tp+=1
-        tp+=2
+    pe,pb,dy=[(val or {}).get(k) for k in ('pe','pb','yield')]
+    if pe is not None:
+        fa+=5; fp+=5 if 0<pe<=25 else (3 if 25<pe<=50 else (1 if pe>50 else 0))
+        freasons.append('本益比依原規則計分')
+    if pb is not None: fa+=3; fp+=3 if 0<pb<=3 else (2 if 3<pb<=6 else (1 if pb>6 else 0))
+    if dy is not None: fa+=4; fp+=1
+    q=quote or {}; px=q.get('price'); pct=q.get('pct'); op=q.get('open'); hi=q.get('high'); lo=q.get('low')
+    if px is not None:
+        ta+=2; tp+=2
+        if pct is not None: ta+=7; tp+=(5 if pct>0 else 0)+(2 if pct>=2 else 0)
+        if op is not None:
+            ta+=4
+            if px>=op: tp+=4; treasons.append('價格守在開盤價之上')
+        if hi is not None and lo is not None and hi>lo:
+            ta+=5; position=(px-lo)/(hi-lo); tp+=5 if position>=.8 else (3 if position>=.55 else 1)
     ma20=ma60=ret20=avgvol20=None
     if len(hist)>=20:
-        closes=[x['close'] for x in hist]; vols=[x['volume'] for x in hist]
-        ma20=sum(closes[-20:])/20; avgvol20=sum(vols[-20:])/20
-        ret20=(closes[-1]/closes[-20]-1)*100 if closes[-20] else None
-        ta+=12
-        if closes[-1]>ma20: tp+=5; treasons.append('收盤在20日均線之上')
-        if ret20 is not None and ret20>0: tp+=3
-        if avgvol20 and vols[-1]>avgvol20: tp+=2; treasons.append('成交量高於20日均量')
-        tp+=1
+        closes=[x['close'] for x in hist]; vols=[x['volume'] for x in hist[-20:]]
+        ma20=sum(closes[-20:])/20; ret20=(closes[-1]/closes[-20]-1)*100
+        ta+=10; tp+=(5 if closes[-1]>ma20 else 0)+(3 if ret20>0 else 0)+1
+        if all(v is not None for v in vols):
+            avgvol20=sum(vols)/20; ta+=2
+            if avgvol20>0 and vols[-1]>avgvol20: tp+=2; treasons.append('成交量高於20日均量')
     if len(hist)>=60:
         ma60=sum(x['close'] for x in hist[-60:])/60; ta+=10
-        if hist[-1]['close']>ma60: tp+=4
-        if ma20 and ma20>ma60: tp+=4; treasons.append('20日均線高於60日均線')
-        tp+=1
-    # Chip: official institutional flow when available.
-    cp=0; ca=0; creasons=[]
-    if inst:
-        ca=40; total=inst['total']; foreign=inst['foreign']; trust=inst['trust']
-        if total>0: cp+=16; creasons.append('三大法人合計買超')
-        elif total==0: cp+=8
-        if foreign>0: cp+=10; creasons.append('外資買超')
-        elif foreign==0: cp+=5
-        if trust>0: cp+=10; creasons.append('投信買超')
-        elif trust==0: cp+=5
-        cp+=4
-    # Overnight adjusted component scores and completeness.
-    f20=_norm(fp,fa,20); t40=_norm(tp,ta,40); c40=_norm(cp,ca,40)
-    avail_o=(20 if f20 is not None else 0)+(40 if t40 is not None else 0)+(40 if c40 is not None else 0)
-    total_o=sum(x for x in [f20,t40,c40] if x is not None)
-    comp_o=round(min(100, fa/20*20 + ta/40*40 + ca/40*40))
-    # Keep completeness strict; recommendation requires >=60% and technical/chip evidence.
-    overnight_enough=comp_o>=60 and t40 is not None and c40 is not None
-    overnight_ok=overnight_enough and total_o>=65 and t40>=24 and c40>=20
-    overnight_status='符合' if overnight_ok else ('不符合' if overnight_enough else '資料不足')
-    # Swing 35/35/30 reweight from same verified evidence; history is required.
-    f35=_norm(fp,fa,35); t35=_norm(tp,ta,35); c30=_norm(cp,ca,30)
-    total_s=sum(x for x in [f35,t35,c30] if x is not None)
-    comp_s=round(min(100, fa/20*35 + ta/40*35 + ca/40*30))
-    swing_enough=len(hist)>=20 and comp_s>=60 and t35 is not None
-    swing_ok=(not overnight_ok) and swing_enough and total_s>=62 and t35>=20
-    swing_status='符合' if swing_ok else ('不符合' if swing_enough else '資料不足')
-    # Price plan only when enough daily history exists.
+        tp+=(4 if hist[-1]['close']>ma60 else 0)+(4 if ma20>ma60 else 0)+1
+    for key,weight,label in [('total',16,'三大法人合計'),('foreign',10,'外資'),('trust',10,'投信')]:
+        value=(inst or {}).get(key)
+        if value is not None:
+            ca+=weight; cp+=weight if value>0 else (weight/2 if value==0 else 0)
+            if value>0: creasons.append(label+'買超')
+    if inst and all(inst.get(k) is not None for k in ('total','foreign','trust','dealer')): ca+=4; cp+=4
+    # Fixed denominators: missing evidence NEVER redistributes or inflates points.
+    f20=round(fp,2) if fa else None; t40=round(tp,2) if ta else None; c40=round(cp,2) if ca else None
+    f35=round(fp/20*35,2) if fa else None; t35=round(tp/40*35,2) if ta else None; c30=round(cp/40*30,2) if ca else None
+    total_o=round(fp+tp+cp,2) if fa+ta+ca else None
+    total_s=round(fp/20*35+tp/40*35+cp/40*30,2) if fa+ta+ca else None
+    comp_o=round(fa+ta+ca); comp_s=round(fa/20*35+ta/40*35+ca/40*30)
+    enough_o=comp_o>=60 and ta>0 and ca>0
+    overnight_ok=bool(enough_o and total_o>=65 and t40>=24 and c40>=20)
+    enough_s=len(hist)>=20 and comp_s>=60 and ta>0
+    swing_ok=bool(not overnight_ok and enough_s and total_s>=62 and t35>=20)
     plan=None
-    if swing_ok and quote and quote.get('price') and len(hist)>=20:
-        recent=hist[-20:]; support=max(min(x['low'] for x in recent[-10:] if x['low']), ma20*0.97 if ma20 else 0)
-        entry_low=max(support, (ma20 or quote['price'])*0.985); entry_high=max(entry_low, (ma20 or quote['price'])*1.015)
-        stop=min(entry_low*0.965, support*0.985) if support else entry_low*.96
-        risk=max(entry_high-stop, entry_high*.02); resistance=max(x['high'] for x in recent if x['high'])
-        target1=max(resistance, entry_high+1.5*risk); target2=entry_high+2.2*risk
-        trend='10–20個交易日' if ma60 and ma20 and ma20>ma60 else '5–10個交易日'
-        plan={'holding':trend,'entry':[round(entry_low,2),round(entry_high,2)],'stop':round(stop,2),'target1':round(target1,2),'target2':round(target2,2),'rr1':round((target1-entry_high)/risk,2),'basis':'20日均線、近10日低點、近20日壓力與RR≥1.5；價格觸及失效條件優先於持有天數'}
-    return {
-      'method':'規則式研究評分，不代表保證報酬或個人化投資建議',
-      'fundamental':{'overnight_score':f20,'swing_score':f35,'available_points':fa,'reasons':freasons,'valuation':val},
-      'technical':{'overnight_score':t40,'swing_score':t35,'available_points':ta,'reasons':treasons,'ma20':round(ma20,2) if ma20 else None,'ma60':round(ma60,2) if ma60 else None,'return20':round(ret20,2) if ret20 is not None else None},
-      'chips':{'overnight_score':c40,'swing_score':c30,'available_points':ca,'reasons':creasons,'institutional':inst},
-      'overnight':{'score':total_o,'completeness':min(100,comp_o),'eligible':overnight_ok,'status':overnight_status,'threshold':'完整度>=60、總分>=65、技術>=24/40、籌碼>=20/40'},
-      'swing':{'score':total_s,'completeness':min(100,comp_s),'eligible':swing_ok,'status':swing_status,'threshold':'隔日沖不符合後，至少20日歷史、完整度>=60、總分>=62、技術>=20/35','plan':plan},
-      'missing':[x for x,ok in [('估值/基本面量化',bool(val)),('20日以上歷史K線',len(hist)>=20),('三大法人籌碼',bool(inst))] if not ok]
-    }
+    lows=[r['low'] for r in hist[-10:]]; highs=[r['high'] for r in hist[-20:]]
+    if swing_ok and px is not None and len(hist)>=20 and all(x is not None for x in lows+highs):
+        support=min(lows); resistance=max(highs)
+        entry_low=max(support,ma20*.985); entry_high=max(entry_low,ma20*1.015)
+        stop=min(entry_low*.965,support*.985); risk=max(entry_high-stop,entry_high*.02)
+        target1=max(resistance,entry_high+1.5*risk); target2=max(target1,entry_high+2.2*risk)
+        plan={'holding':'10–20個交易日' if ma60 and ma20>ma60 else '5–10個交易日',
+              'entry':[round(entry_low,2),round(entry_high,2)],'stop':round(stop,2),
+              'target1':round(target1,2),'target2':round(target2,2),'rr1':round((target1-entry_high)/risk,2),
+              'support':support,'resistance':resistance,'basis':'支撐近10日低點、壓力近20日高點，以收盤確認；情境價格不是預測。'}
+    return {'method':'規則式研究評分；固定權重，缺值不補分，不代表保證報酬。',
+        'fundamental':{'overnight_score':f20,'swing_score':f35,'available_points':fa,'reasons':freasons,'valuation':val},
+        'technical':{'overnight_score':t40,'swing_score':t35,'available_points':ta,'reasons':treasons,'ma20':ma20,'ma60':ma60,'return20':ret20},
+        'chips':{'overnight_score':c40,'swing_score':c30,'available_points':ca,'reasons':creasons,'institutional':inst},
+        'overnight':{'score':total_o,'completeness':comp_o,'eligible':overnight_ok,'status':'符合' if overnight_ok else ('不符合' if enough_o else '資料不足'),'threshold':'基本20／技術40／籌碼40；完整度>=60、總分>=65、技術>=24、籌碼>=20'},
+        'swing':{'score':total_s,'completeness':comp_s,'eligible':swing_ok,'status':'符合' if swing_ok else ('不符合' if enough_s else '資料不足'),'plan':plan,'threshold':'基本35／技術35／籌碼30；隔日沖不符合、至少20日歷史、完整度>=60、總分>=62、技術>=20'},
+        'missing':[label for label,ok in [('完整基本面',fa==20),('完整技術面',ta==40),('完整法人淨買賣超',ca==40)] if not ok]}
 
 @app.get('/api/stock/analysis')
 def stock_analysis():
@@ -467,7 +545,8 @@ def stock_analysis():
     if not code:return jsonify({'ok':False,'error':'code required'}),400
     try:
         c=company_by_code_fast(code)
-        if not c:return jsonify({'ok':False,'error':'stock code not found'}),404; q=None; errors=[]
+        if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
+        q=None; errors=[]
         try:q=mis_quote(code,c['market'])
         except Exception as e: errors.append({'part':'行情','error':str(e)[:180]})
         try:
@@ -483,6 +562,8 @@ def safe_call(fn,default=None):
     try:return fn(),None
     except Exception as e:return default,str(e)[:180]
 def stock_group(c):
+    overrides={'2408':'記憶體','6669':'AI伺服器','8358':'PCB／銅箔'}
+    if c.get('code') in overrides: return overrides[c['code']]
     industry=(c.get('industry') or '').strip(); business=(c.get('business') or '').strip(); text=(industry+' '+business).lower()
     rules=[
       (['記憶體','dram','nand'], '記憶體'),(['伺服器','server'], 'AI伺服器'),
@@ -492,16 +573,16 @@ def stock_group(c):
       (['營建','建設'], '營建'),(['生技','製藥','醫療'], '生技醫療')]
     for keys,label in rules:
         if any(k in text for k in keys):return label
-    return industry or 'Unavailable'
+    return {'24':'半導體','25':'電腦及週邊設備','26':'光電','27':'通信網路','28':'電子零組件','17':'金融保險','20':'其他'}.get(industry, industry if industry and not industry.isdigit() else 'Unavailable')
 
 def technical_snapshot(c,q):
     h=market_history(c['code'],c['market'],12)
     if not h:return {'status':'資料不足','history_days':0,'group':stock_group(c)}
-    cl=[x['close'] for x in h if x.get('close')]; vo=[x.get('volume') or 0 for x in h if x.get('close')]
+    cl=[x['close'] for x in h if x.get('close')]; vo=[x.get('volume') for x in h if x.get('close')]
     def ma(k):return round(sum(cl[-k:])/k,2) if len(cl)>=k else None
-    ms={str(k):ma(k) for k in [5,10,20,60,120,240]}; px=(q or {}).get('price') or cl[-1]; r=h[-20:]
-    lows=[x['low'] for x in r if x.get('low')]; highs=[x['high'] for x in r if x.get('high')]; av=round(sum(vo[-20:])/20,0) if len(vo)>=20 else None
-    support=round(min(lows[-10:]),2) if lows else None; resistance=round(max(highs),2) if highs else None
+    ms={str(k):ma(k) for k in [5,10,20,60,120,240]}; px=cl[-1]; r=h[-20:]
+    lows=[x.get('low') for x in h[-10:]]; highs=[x.get('high') for x in h[-20:]]; av=sum(vo[-20:])/20 if len(vo)>=20 and all(v is not None for v in vo[-20:]) else None
+    support=round(min(lows),2) if len(lows)==10 and all(v is not None for v in lows) else None; resistance=round(max(highs),2) if len(highs)==20 and all(v is not None for v in highs) else None
     st='整理'
     if ms['20'] and ms['60']:st='多頭排列／偏強' if px>ms['20']>ms['60'] else ('空頭排列／偏弱' if px<ms['20']<ms['60'] else ('站回月線／整理偏強' if px>ms['20'] else '月線下方／整理偏弱'))
     sr={'support':support,'resistance':resistance,
@@ -510,9 +591,9 @@ def technical_snapshot(c,q):
       'resistance_valid':f'接近 {resistance} 無法收盤站穩，或突破後迅速跌回，壓力仍有效' if resistance is not None else 'Unavailable',
       'resistance_invalid':f'帶量突破且收盤站穩 {resistance}，後續回測不破，原壓力可視為轉支撐' if resistance is not None else 'Unavailable',
       'basis':'支撐採近10交易日低點；壓力採近20交易日高點。以收盤確認為主，盤中刺穿不單獨判定失效。'}
-    return {'status':'ok','history_days':len(h),'group':stock_group(c),'ma':ms,'support':support,'resistance':resistance,
+    return {'status':'ok' if len(h)>=20 else '資料不足','as_of':h[-1]['date'],'price_basis':'官方日K收盤；非MIS現價','history_days':len(h),'group':stock_group(c),'ma':ms,'support':support,'resistance':resistance,
       'support_resistance':sr,'volume_ratio20':round(vo[-1]/av,2) if av else None,'state':st,
-      'note':'技術現況描述，不預測漲跌；支撐／壓力為動態區域，需隨每日K線更新。'}
+      'note':'未復權歷史價格，除權息可能造成跳空。技術現況描述，不預測漲跌；支撐／壓力為動態區域，需隨每日K線更新。'}
 
 def peer_snapshot(c,limit=6):
     out=[]
@@ -530,44 +611,71 @@ def _company_by_code(code):
 def stock_summary():
     code=request.args.get('code','').strip(); c=_company_by_code(code)
     if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
-    q,e=safe_call(lambda:mis_quote(code,c['market'])); v,e2=safe_call(lambda:valuation_row(code,c['market']))
-    return jsonify({'ok':True,'company':{**{k:v for k,v in c.items() if k!='raw'},'group':stock_group(c)},'quote':q,'valuation':v,'valuation_status':{'pe':'OK' if v and v.get('pe') is not None else 'Unavailable','pb':'OK' if v and v.get('pb') is not None else 'Unavailable','yield':'OK' if v and v.get('yield') is not None else 'Unavailable'},'source_status':{'公司':'OK','行情':'OK' if q and q.get('price') is not None else 'Unavailable','估值':'OK' if v and any(v.get(k) is not None for k in ('pe','pb','yield')) else 'Unavailable'}})
+    v=valuation_row(code,c['market'],wait=False)
+    q,e=safe_call(lambda:mis_quote(code,c['market']))
+    vs=_VALUATION_CACHE.status(c['market'])
+    return jsonify({'ok':True,'company':{**{k:v for k,v in c.items() if k!='raw'},'group':stock_group(c)},
+        'quote':q,'valuation':v,'status':'OK',
+        'valuation_status':{k:'OK' if v and v.get(k) is not None else ('Loading' if vs=='Loading' else 'Unavailable') for k in ('pe','pb','yield')},
+        'source_status':{'公司':'OK','行情':'OK' if q and q.get('price') is not None else 'Unavailable',
+            '估值':'OK' if v and any(v.get(k) is not None for k in ('pe','pb','yield')) else ('Loading' if vs=='Loading' else 'Unavailable')},
+        'errors':[x for x in [e,_QUOTE_CACHE.error(code),_VALUATION_CACHE.error(c['market'])] if x]})
+
+def _history_pending(c):
+    data=history_result(c['code'],c['market'])
+    return data, _HISTORY_CACHE.status((c['market'],c['code'],12))
 
 @app.get('/api/stock/technical')
 def stock_technical():
     code=request.args.get('code','').strip(); c=_company_by_code(code)
     if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
-    q,_=safe_call(lambda:mis_quote(code,c['market'])); t,e=safe_call(lambda:technical_snapshot(c,q),{'status':'資料不足'})
-    return jsonify({'ok':True,'technical':t,'status':'OK' if t.get('status')=='ok' else 'Unavailable','error':e})
+    data,status=_history_pending(c)
+    if data is None:return jsonify({'ok':True,'technical':None,'status':status})
+    t,e=safe_call(lambda:technical_snapshot(c,None),{'status':'資料不足'})
+    return jsonify({'ok':True,'technical':t,'status':'OK' if t['status']=='ok' else 'Unavailable','errors':data['errors'],'error':e})
 
 @app.get('/api/stock/model')
 def stock_model():
     code=request.args.get('code','').strip(); c=_company_by_code(code)
     if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
+    data,status=_history_pending(c)
+    _valuation_rows(c['market'],wait=False)
+    _INSTITUTIONAL_CACHE.get(c['market'],lambda:_institutional_rows(c['market']),wait=False)
+    if status=='Loading' or any(cache.status(c['market'])=='Loading' for cache in (_VALUATION_CACHE,_INSTITUTIONAL_CACHE)):
+        return jsonify({'ok':True,'analysis':None,'status':'Loading'})
     q,_=safe_call(lambda:mis_quote(code,c['market'])); a,e=safe_call(lambda:analyst_model(c,q))
-    return jsonify({'ok':True,'analysis':a,'status':'OK' if a else 'Unavailable','error':e})
+    usable=a and (a['overnight']['status']!='資料不足' or a['swing']['status']!='資料不足')
+    return jsonify({'ok':True,'analysis':a,'status':'OK' if usable else 'Unavailable',
+        'errors':(data or {}).get('errors',[])+[x for x in [_INSTITUTIONAL_CACHE.error(c['market']),_VALUATION_CACHE.error(c['market'])] if x], 'error':e})
 
 @app.get('/api/stock/peers')
 def stock_peers():
     code=request.args.get('code','').strip(); c=_company_by_code(code)
     if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
-    out=[]
-    for x in [x for x in company_rows() if x['code']!=code and x.get('industry')==c.get('industry')][:8]:
-        v,_=safe_call(lambda x=x:valuation_row(x['code'],x['market']))
-        if v:out.append({'code':x['code'],'name':x['name'],'pe':v.get('pe'),'pb':v.get('pb'),'yield':v.get('yield')})
-        if len(out)>=5:break
-    return jsonify({'ok':True,'rows':out,'status':'OK' if out else 'Unavailable'})
+    candidates=[x for x in company_rows() if x['code']!=code and c.get('industry') and x.get('industry')==c['industry']][:8]
+    out=[]; loading=False
+    for x in candidates:
+        v=valuation_row(x['code'],x['market'],wait=False)
+        loading=loading or _VALUATION_CACHE.status(x['market'])=='Loading'
+        if v and any(v.get(k) is not None for k in ('pe','pb','yield')):
+            out.append({'code':x['code'],'name':x['name'],'market':x['market'],'group':stock_group(x),**v})
+    return jsonify({'ok':True,'rows':out[:5],'status':'Loading' if loading else ('OK' if out else 'Unavailable'),
+                    'basis':'相同官方產業分類，非完全相同產品；估值日期請逐列確認'})
 
 @app.get('/api/stock/research')
 def stock_research():
     code=request.args.get('code','').strip(); c=_company_by_code(code)
     if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
     q,_=safe_call(lambda:mis_quote(code,c['market']))
-    return jsonify({'ok':True,'version':'9.2.2-valuation-sr-group','company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'note':'heavy modules load independently'})
+    return jsonify({'ok':True,'version':'9.2.3','company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'note':'heavy modules load independently'})
 
 def _warm_company_cache():
-    try: _install_company_rows(_load_company_rows())
-    except Exception: pass
-threading.Thread(target=_warm_company_cache,daemon=True).start()
+    while True:
+        try: _install_company_rows(_load_company_rows())
+        except Exception as exc: app.logger.warning('company warmup: %s',exc)
+        time.sleep(_COMPANY_TTL if company_rows() else 60)
 
-if __name__=='__main__': app.run(host='0.0.0.0',port=int(os.getenv('PORT','8787')),debug=False)
+if os.getenv('COMPANY_WARMUP','1') != '0':
+    threading.Thread(target=_warm_company_cache,daemon=True,name='company-master').start()
+
+if __name__=='__main__': app.run(host='0.0.0.0',port=int(os.getenv('PORT','8787')),debug=False,threaded=True)
