@@ -6,6 +6,7 @@ import threading, math, datetime
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from copy import deepcopy
 from collections import OrderedDict
+from html.parser import HTMLParser
 app=Flask(__name__, static_folder='.')
 BASE=os.path.dirname(__file__)
 
@@ -96,20 +97,100 @@ _COMPANY_INDEX={}
 _COMPANY_LOCK=threading.Lock()
 _COMPANY_TTL=21600
 
-def _load_company_rows():
-    # Remote refresh: background only. Request handlers never call this.
-    rows=[]
-    sources=[('上市','https://openapi.twse.com.tw/v1/opendata/t187ap03_L'),('上櫃','https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O')]
-    for market,url in sources:
-        try:
-            data=get_json(url)
-            for r in data:
-                code=str(r.get('公司代號') or r.get('SecuritiesCompanyCode') or '').strip()
-                name=str(r.get('公司簡稱') or r.get('公司名稱') or r.get('CompanyAbbreviation') or r.get('CompanyName') or '').strip()
-                if not code or not name: continue
-                rows.append({'code':code,'name':name,'market':market,'industry':str(r.get('產業別') or r.get('產業類別') or r.get('SecuritiesIndustryCode') or r.get('Industry') or '').strip(),'business':str(r.get('主要經營業務') or r.get('營業項目') or r.get('BusinessScope') or '').strip(),'raw':r})
-        except Exception: continue
+_COMPANY_STATE={'loading':False,'attempted':False,'markets':{},'last_attempt':None}
+_COMPANY_REFRESH=threading.Event()
+
+class _CompanyTable(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.rows=[]; self.row=[]; self.cell=None
+    def handle_starttag(self,tag,attrs):
+        if tag=='tr': self.row=[]
+        if tag in ('td','th'): self.cell=[]
+    def handle_data(self,data):
+        if self.cell is not None:self.cell.append(data)
+    def handle_endtag(self,tag):
+        if tag in ('td','th') and self.cell is not None:
+            self.row.append(''.join(self.cell).strip()); self.cell=None
+        if tag=='tr' and self.row:self.rows.append(self.row)
+
+def _isin_company_rows(market):
+    # Official ISIN directory; metadata only, never a price substitute.
+    mode='2' if market=='上市' else '4'
+    raw=fetch('https://isin.twse.com.tw/isin/C_public.jsp?strMode='+mode,'text/html')
+    try: html=raw.decode('utf-8')
+    except UnicodeDecodeError: html=raw.decode('cp950')
+    parser=_CompanyTable(); parser.feed(html); rows=[]
+    for cells in parser.rows:
+        if len(cells)<6 or cells[3].strip()!=market:continue
+        parts=cells[0].split(None,1)
+        if len(parts)!=2 or not re.fullmatch(r'[0-9]{4,6}',parts[0]):continue
+        # The directory also contains bonds and warrants. Keep ordinary shares.
+        if not cells[5].strip().startswith('ES'):continue
+        rows.append({'code':parts[0],'name':parts[1].strip(),'market':market,
+            'industry':cells[4].strip(),'business':'','raw':{},'metadata_source':'TWSE ISIN'})
+    if not rows:raise ValueError('official ISIN directory contained no recognizable stock rows')
     return rows
+
+def _master_company_rows(market,url):
+    data=get_json(url)
+    if not isinstance(data,list):raise ValueError('company master is not a JSON list')
+    rows=[]
+    for r in data:
+        if not isinstance(r,dict):continue
+        code=str(r.get('公司代號') or r.get('SecuritiesCompanyCode') or '').strip()
+        name=str(r.get('公司簡稱') or r.get('CompanyAbbreviation') or r.get('公司名稱') or r.get('CompanyName') or '').strip()
+        if not re.fullmatch(r'[0-9]{4,6}',code) or not name:continue
+        rows.append({'code':code,'name':name,'market':market,
+            'industry':str(r.get('產業別') or r.get('產業類別') or r.get('SecuritiesIndustryCode') or r.get('Industry') or '').strip(),
+            'business':str(r.get('主要經營業務') or r.get('營業項目') or r.get('BusinessScope') or '').strip(),
+            'raw':r,'metadata_source':'TWSE OpenAPI' if market=='上市' else 'TPEx OpenAPI'})
+    if not rows:raise ValueError('company master returned no recognizable company rows')
+    return rows
+
+def _load_company_rows():
+    # Called ONLY by the background warmup. Publish each successful market early.
+    rows=[]
+    sources=[('上市','https://openapi.twse.com.tw/v1/opendata/t187ap03_L'),
+             ('上櫃','https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O')]
+    with _COMPANY_LOCK:
+        _COMPANY_STATE.update(loading=True,last_attempt=time.time())
+    try:
+        for market,url in sources:
+            errors=[]; received=[]; source='OpenAPI'
+            try:received=_master_company_rows(market,url)
+            except Exception as exc:
+                errors.append('OpenAPI: '+str(exc)[:200]);source='ISIN'
+                try:received=_isin_company_rows(market)
+                except Exception as fallback_exc:errors.append('ISIN: '+str(fallback_exc)[:200])
+            if received:
+                _install_company_rows(received); rows.extend(received)
+            with _COMPANY_LOCK:
+                _COMPANY_STATE['markets'][market]={'status':'OK' if received else 'Unavailable',
+                    'rows':len(received),'source':source if received else None,'errors':errors,'checked_at':time.time()}
+            if errors:app.logger.warning('company master market=%s rows=%s errors=%s',market,len(received),errors)
+    finally:
+        with _COMPANY_LOCK:_COMPANY_STATE.update(loading=False,attempted=True)
+    return rows
+
+def company_status():
+    with _COMPANY_LOCK:
+        state=deepcopy(_COMPANY_STATE); state['cached_rows']=len(_COMPANY_CACHE['rows'])
+        state['complete']=all(state['markets'].get(m,{}).get('status')=='OK' for m in ('上市','上櫃'))
+        return state
+
+def _company_unresolved(code=None):
+    state=company_status()
+    pending=state['loading'] or not state['attempted'] or (code and _QUOTE_CACHE.status(code)=='Loading')
+    # A failed remote request is not evidence that a stock does not exist.
+    status='Loading' if pending else ('NotFound' if state['complete'] else 'Unavailable')
+    message={'Loading':'公司資料載入中，正在重試。',
+             'NotFound':'官方公司清單中查無此股票。',
+             'Unavailable':'公司資料來源暫時無法取得，並非股票不存在；背景將重試。'}[status]
+    return {'ok':True,'rows':[],'status':status,'message':message,'company_cache':state}
+
+@app.get('/api/company/status')
+def company_source_status():
+    return jsonify({'ok':True,**company_status()})
 
 def _install_company_rows(rows):
     if not rows:return False
@@ -188,7 +269,7 @@ def manifest(): return send_from_directory(BASE,'manifest.webmanifest',mimetype=
 @app.get('/sw.js')
 def sw(): return send_from_directory(BASE,'sw.js',mimetype='application/javascript')
 @app.get('/health')
-def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'9.2.3'})
+def health(): return jsonify({'ok':True,'service':'tw-stock-dashboard','version':'9.2.3.1'})
 
 @app.get('/api/twse/realtime')
 def realtime():
@@ -217,11 +298,12 @@ def company_search():
     if not q:return jsonify({'ok':True,'rows':[]})
     if q.isdigit():
         c=company_by_code_fast(q)
-        return jsonify({'ok':True,'rows':[{k:v for k,v in c.items() if k!='raw'}] if c else []})
-    rows=company_rows()
-    ql=q.lower()
+        if c:return jsonify({'ok':True,'status':'OK','rows':[{k:v for k,v in c.items() if k!='raw'}]})
+        return jsonify(_company_unresolved(q))
+    rows=company_rows(); ql=q.lower()
     out=[{k:v for k,v in x.items() if k!='raw'} for x in rows if ql in x['name'].lower() or ql in x['code'].lower()]
-    return jsonify({'ok':True,'rows':out[:20],'cached':bool(rows),'status':'OK' if rows else 'Loading'})
+    if out:return jsonify({'ok':True,'status':'OK','rows':out[:20],'cached':True})
+    return jsonify(_company_unresolved())
 
 @app.get('/api/stock/context')
 def stock_context():
@@ -667,13 +749,15 @@ def stock_research():
     code=request.args.get('code','').strip(); c=_company_by_code(code)
     if not c:return jsonify({'ok':False,'error':'stock code not found'}),404
     q,_=safe_call(lambda:mis_quote(code,c['market']))
-    return jsonify({'ok':True,'version':'9.2.3','company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'note':'heavy modules load independently'})
+    return jsonify({'ok':True,'version':'9.2.3.1','company':{k:v for k,v in c.items() if k!='raw'},'quote':q,'note':'heavy modules load independently'})
 
 def _warm_company_cache():
     while True:
-        try: _install_company_rows(_load_company_rows())
-        except Exception as exc: app.logger.warning('company warmup: %s',exc)
-        time.sleep(_COMPANY_TTL if company_rows() else 60)
+        try:_load_company_rows()
+        except Exception as exc:
+            app.logger.exception('company warmup failed: %s',exc)
+        delay=_COMPANY_TTL if company_status()['complete'] else 30
+        _COMPANY_REFRESH.wait(delay);_COMPANY_REFRESH.clear()
 
 if os.getenv('COMPANY_WARMUP','1') != '0':
     threading.Thread(target=_warm_company_cache,daemon=True,name='company-master').start()
